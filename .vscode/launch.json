@@ -1,0 +1,18 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+
+
+        {
+            "name": "Python: Train Script (With Args)",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}", // 현재 열려있는 파일을 실행
+            "console": "integratedTerminal",
+            "args": [
+                "--eval"
+
+            ]
+        },
+    ]
+}
