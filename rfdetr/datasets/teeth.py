@@ -10,7 +10,8 @@ import os
 import pickle
 from pathlib import Path
 
-
+import torch.utils.data
+import torchvision
 import pycocotools.mask as coco_mask
 
 import rfdetr.datasets.transforms as T
@@ -39,12 +40,19 @@ class TeethDetection:
     def __init__(self, *,
                  img_folder, 
                  transforms=None, include_masks=False, name='train', debug=False,**kwargs):
-        super(TeethDetection, self).__init__()
+        # super(TeethDetection, self).__init__('', '')
         self._transforms = transforms
         self.include_masks = include_masks
         self.name = name
         self.debug = debug
         found = diskmanager.deep_search_all_files(str(img_folder), exts=['.pkl'])
+        splits = {
+            'train': [0, 0.85],
+            'val': [0.85, 0.9],
+            'valid': [0.85, 0.9],
+            'test': [0.9, 1.0],
+        }
+        split = splits.get(name, [0, 1.0])
         
         found_files = []
         for path, files in found.items():
@@ -55,7 +63,10 @@ class TeethDetection:
                 
             # if path.endswith(name):
                 # img_folder = path
-        self.files = found_files
+        start, end = len(found_files) * split[0], len(found_files) * split[1]
+        start, end  = int(start), int(end)
+        self.files = found_files[start:end]
+        # self.prepare = 
         # self
 
     def parse_file(self, idx):

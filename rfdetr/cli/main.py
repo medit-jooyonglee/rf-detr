@@ -65,6 +65,8 @@ def train_from_coco_dir(coco_dir: str):
 def train_from_teeth_dir(teeth_dir: str):
     rf_detr = RFDETRBase(
         segmentation_head=True,
+    patch_size=8,
+        num_windows=4,
 
     )
     device_supports_cuda = torch.cuda.is_available()
@@ -83,6 +85,9 @@ def train_from_teeth_dir(teeth_dir: str):
         mask_dice_loss_coef=5.,
         mask_point_sample_ratio=16,
         grad_accum_steps=1,
+        coco_evaluate=False,
+        multi_scale=False,
+        num_queries=30,
     )
 
 def trainer():

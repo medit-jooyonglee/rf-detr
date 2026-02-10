@@ -127,7 +127,11 @@ class Model:
                 if any(name.endswith(x) for x in query_param_names):
                     checkpoint['model'][name] = state[:num_desired_queries]
 
-            self.model.load_state_dict(checkpoint['model'], strict=False)
+            try:
+                self.model.load_state_dict(checkpoint['model'], strict=False)
+            except Exception as e:
+                print(f"Failed to load pretrain weights: {e}")
+                # raise e
 
         if args.backbone_lora:
             print("Applying LORA to backbone")
