@@ -117,7 +117,9 @@ def trainer():
 if __name__ == "__main__":
     # trainer()
     
-    coco_dir = 'E:/dataset/teeth_seg_3d/render_2dset2'
+    # coco_dir = 'E:/dataset/teeth_seg_3d/render_2dset2'
+    coco_dir = '/data1/jooyonglee/teeth_segmentation3d/render_set/teeth_seg_3d/'
+    torch.cuda.set_device(torch.device('cuda:4'))
     train_from_teeth_dir(coco_dir)
 
     # coco_dir = 'E:/dataset/coco/base'
