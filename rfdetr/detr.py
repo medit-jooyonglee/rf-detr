@@ -37,6 +37,7 @@ from rfdetr.config import (
 from rfdetr.main import Model, download_pretrain_weights
 from rfdetr.util.metrics import MetricsPlotSink, MetricsTensorBoardSink, MetricsWandBSink
 from rfdetr.util.coco_classes import COCO_CLASSES
+from rfdetr.util.teeth_classes import TEETH_TYPE_CLASSES
 
 logger = getLogger(__name__)
 class RFDETR:
@@ -135,6 +136,10 @@ class RFDETR:
         elif config.dataset_file == "coco":
             class_names = COCO_CLASSES
             num_classes = 90
+        elif config.dataset_file == "teeth":
+            class_names = ["tooth"]
+            class_names = TEETH_TYPE_CLASSES
+            num_classes = 9
         else:
             raise ValueError(f"Invalid dataset file: {config.dataset_file}")
 

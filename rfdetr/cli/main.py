@@ -8,7 +8,7 @@
 # ------------------------------------------------------------------------
 
 import argparse
-from rf100vl import get_rf100vl_projects
+# from rf100vl import get_rf100vl_projects
 import roboflow
 from rfdetr import RFDETRBase
 import torch
@@ -46,12 +46,43 @@ def train_from_rf_project(rf_project: roboflow.Project, dataset_version: int):
 
 def train_from_coco_dir(coco_dir: str):
     rf_detr = RFDETRBase()
+    device_supports_cuda = torch.cuda.is_available()
+    
     rf_detr.train(
         dataset_dir=coco_dir,
-        epochs=1,
+        epochs=100,
         device="cuda" if device_supports_cuda else "cpu",
+        dataset_file='coco',
+        coco_path=coco_dir,
+        batch_size=1,
+        num_workers=0,
+        
+        # eval=True,
+        # resume="output/checkpoint_best_ema.pth"
     )
 
+
+def train_from_teeth_dir(teeth_dir: str):
+    rf_detr = RFDETRBase(
+        segmentation_head=True,
+
+    )
+    device_supports_cuda = torch.cuda.is_available()
+    
+    rf_detr.train(
+        dataset_dir=teeth_dir,
+        epochs=100,
+        device="cuda" if device_supports_cuda else "cpu",
+        dataset_file='teeth',
+        # coco_path=teeth_dir,
+        batch_size=1,
+        num_workers=0,
+        square_resize=False,
+        segmentation_head=True,
+        mask_ce_loss_coef=5.,
+        mask_dice_loss_coef=5.,
+        mask_point_sample_ratio=16
+    )
 
 def trainer():
     parser = argparse.ArgumentParser()
@@ -84,4 +115,10 @@ def trainer():
 
 
 if __name__ == "__main__":
-    trainer()
+    # trainer()
+    
+    coco_dir = 'E:/dataset/teeth_seg_3d/render_2dset2'
+    train_from_teeth_dir(coco_dir)
+
+    # coco_dir = 'E:/dataset/coco/base'
+    # train_from_coco_dir(coco_dir)
