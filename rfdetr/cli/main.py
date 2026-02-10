@@ -81,7 +81,8 @@ def train_from_teeth_dir(teeth_dir: str):
         segmentation_head=True,
         mask_ce_loss_coef=5.,
         mask_dice_loss_coef=5.,
-        mask_point_sample_ratio=16
+        mask_point_sample_ratio=16,
+        grad_accum_steps=1,
     )
 
 def trainer():

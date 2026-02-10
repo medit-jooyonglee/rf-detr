@@ -15,7 +15,7 @@ import pycocotools.mask as coco_mask
 
 import rfdetr.datasets.transforms as T
 from trainer import diskmanager, jsonserialize, torch_utils
-from trainer.test.test_image_utils import bboxes
+# from trainer.test.test_image_utils import bboxes
 from trainer import utils_numpy
 
 
