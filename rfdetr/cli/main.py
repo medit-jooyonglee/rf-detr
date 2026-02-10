@@ -81,7 +81,8 @@ def train_from_teeth_dir(teeth_dir: str):
         segmentation_head=True,
         mask_ce_loss_coef=5.,
         mask_dice_loss_coef=5.,
-        mask_point_sample_ratio=16
+        mask_point_sample_ratio=16,
+        grad_accum_steps=1,
     )
 
 def trainer():
@@ -117,7 +118,9 @@ def trainer():
 if __name__ == "__main__":
     # trainer()
     
-    coco_dir = 'E:/dataset/teeth_seg_3d/render_2dset2'
+    # coco_dir = 'E:/dataset/teeth_seg_3d/render_2dset2'
+    coco_dir = '/data1/jooyonglee/teeth_segmentation3d/render_set/teeth_seg_3d/'
+    torch.cuda.set_device(torch.device('cuda:4'))
     train_from_teeth_dir(coco_dir)
 
     # coco_dir = 'E:/dataset/coco/base'
