@@ -97,6 +97,9 @@ class TeethDetection:
         bboxes = bboxes[..., :2].reshape([-1, 4])
         fdi_labels = np.array(fdi_labels)
         
+        w, h = input_img.shape[:2]
+        box_shape = np.array([w, h, w, h])
+        bboxes = bboxes / box_shape
         
         vmin, vmax = data.min(), data.max()
         
