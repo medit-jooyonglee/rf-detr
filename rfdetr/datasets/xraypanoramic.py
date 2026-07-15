@@ -661,7 +661,10 @@ class XrayPnoaramicInstanceCoco(CocoDetection):
         CocoDetection.__init__(self, img_folder, annot_file, transforms, include_masks)
         self.include_masks = include_masks
         self.base_datset = XrayPnoaramicInstance(
-            img_folder, **kwargs
+            img_folder, 
+            include_masks=include_masks,
+            **kwargs,
+                            #  include_masks=False,
         )
         
     def __len__(self):
@@ -919,6 +922,7 @@ def build(image_set, args, resolution):
         annot_file=annot_file,
         transforms=None,
         name=image_set,
+        include_masks=args.segmentation_head,
         num_classes=getattr(args, 'num_classes', 2),
         # **args_dict
     )
