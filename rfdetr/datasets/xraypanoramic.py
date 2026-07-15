@@ -223,19 +223,20 @@ universal_to_fdi = np.array([
 fdi_sort = universal_to_fdi
 
 label2fdi = np.zeros(256, dtype=np.int64)
-label2fdi[np.arange(fdi_sort.size)] = fdi_sort
+label2fdi[fdi_sort] = np.arange(fdi_sort.size)
 label2fdi2 = np.zeros_like(label2fdi)
 label2fdi2[np.arange(fdi_sort.size)] = np.concatenate([
     [0], np.full([16], 1, dtype=np.int64), np.full([16], 2, dtype=np.int64)
 ])
 
 
-def label_to_fdi(labels, num_classes:int):
+def label_mapping(labels, num_classes:int):
     if num_classes == 3:
         return label2fdi2[labels]   
     elif num_classes == 33:
         # return labels
-        return label2fdi[labels]
+        return labels
+        # return label2fdi[labels]
 
 
 class XrayPnoaramicInstance(XrayPnoramic):
@@ -393,7 +394,7 @@ class XrayPnoaramicInstance(XrayPnoramic):
         # ()
         class_labels = np.array([int(obj['class_title']) for obj in annot_data], dtype=np.int64)
         
-        class_labels = label_to_fdi(class_labels, self.num_classes)
+        class_labels = label_mapping(class_labels, self.num_classes)
                 
         
         
@@ -767,22 +768,29 @@ def test_build_coco_json():
         
     img_folder = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2'
     # ann_file = ''
-    dataset = XrayPnoaramicInstance(img_folder, '', None, True)
+    # dataset = XrayPnoaramicInstance(img_folder, '', None, True)
     
+    num_classes = 33
     dataset = XrayPnoaramicInstance(
         img_folder=
             'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2'
         ,
-        stride=4,
+        num_classes=num_classes,
+        # stride=4,
+        
     )
     assert len(dataset) > 0
+    
+    # num_classes = 3
     
     res = dataset.coco_json_export(base_dir=img_folder)
     
     # print(res)
-    
-    with open('xray_coco.json', 'w') as f:
+    filename = f'xray_coco_{num_classes}.json'
+    with open(filename, 'w') as f:
         json.dump(res, f)
+        
+    print(f'coco json file saved to {filename}')
 
 
         
@@ -824,7 +832,7 @@ def test_load_coco_dataset():
         # denorm_bboxes = denorm_bboxes.reshape([-1, 2]).clip(0, size)
         denorm_bboxes_i = denorm_bboxes.astype(np.int32)
         
-        target_fdi = label_to_fdi(target_label)
+        target_fdi = label_mapping(target_label)
         
         from trainer import vtk_utils
         colors_fdis = vtk_utils.get_teeth_color_table(normalize=False)
