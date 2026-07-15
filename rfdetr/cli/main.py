@@ -10,7 +10,7 @@
 import argparse
 # from rf100vl import get_rf100vl_projects
 import roboflow
-from rfdetr import RFDETRBase
+from rfdetr import RFDETRBase, RFDETRNano, RFDETRSmall
 import torch
 import os
 
@@ -71,6 +71,7 @@ def train_from_teeth_dir(teeth_dir: str):
         group_detr=5,
         num_select=20,
         pretrain_weights="output/checkpoint0099.pth",
+        # ='output/xray_teeth33_nano'
     )
     device_supports_cuda = torch.cuda.is_available()
     
@@ -103,9 +104,13 @@ def get_my_arg_parse():
     parser.add_argument("--coco_dir", type=str, default='/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle/Teeth Segmentation JSON/d2/')
     parser.add_argument("--num_classes", type=int, required=False, default=32)
     # parser.add_argument("--project_name", type=str, required=False, default=None)
-    parser.add_argument("--annot_file", type=str, required=False, default='../../xray_coco_33.json')
+    parser.add_argument("--annot_file", type=str, required=False, default='../../xray_coco_33_seg.json')
+    # parser.add_argument("--annot_file", type=str, required=False, default='../../xray_coco_33_seg.json')
     parser.add_argument('--eval', action='store_true', help='Run evaluation after training')
     parser.add_argument('--eval_save', action='store_true', help='Run save results after training')
+    parser.add_argument('--segmentation_head', action='store_true',
+                        default=True, 
+                        help='Run save results after training')
     
     args = parser.parse_args()
     return args
@@ -117,9 +122,12 @@ def train_from_xray_teeth_dir():
     dataset_dir = args.coco_dir
     num_classes = args.num_classes
     annot_file = args.annot_file
+    segmentation_head = args.segmentation_head
     
-    rf_detr = RFDETRBase(
-        # segmentation_head=True,
+    
+    # rf_detr = RFDETRNano(
+    rf_detr = RFDETRSmall(
+        
         patch_size=16,
         num_windows=4,
         num_queries=50,
@@ -130,17 +138,19 @@ def train_from_xray_teeth_dir():
         # eval=True,
         # num_classes=32,
         num_classes=num_classes,
-        
+        segmentation_head=segmentation_head,
         # pretrain_weights="output/checkpoint0099.pth",
         # pretrain_weights="output/xray_teeth/checkpoint0059.pth",
-        pretrain_weights='output/xray_teeth33/checkpoint0039.pth'
+        # pretrain_weights='output/xray_teeth33/checkpoint0039.pth'
+        # pretrain_weights='output/xray_teeth33/checkpoint_best_regular.pth'
+        # pretrain_weights='output/xray_teeth33_small/checkpoint_best_regular.pth'
         
     )
     device_supports_cuda = torch.cuda.is_available()
     
     rf_detr.train(
         dataset_dir=dataset_dir,
-        epochs=100,
+        epochs=200,
         device="cuda" if device_supports_cuda else "cpu",
         dataset_file='xray_teeth',
         # coco_path=teeth_dir,
@@ -156,16 +166,17 @@ def train_from_xray_teeth_dir():
         multi_scale=False,
         num_queries=50,
         num_select=35,
-        # output_dir='output/xray_teeth33',
+        output_dir='output/xray_teeth33_small_seg',
         # annot_file='../../xray_coco_33.json',
         # annot_file='../../xray_coco_33.json',
         annot_file=annot_file,
         # annot_file=''
         # annot_file='../../xray_coco.json',
         # pretrain_weights="output/checkpoint0099.pth",
-        # eval_save=True,
-        # eval=True,
-        **args.__dict__
+        segmentation_head=segmentation_head,
+        eval_save=args.eval_save,
+        eval=args.eval,
+        # **args.__dict__
     )
 
 
@@ -209,12 +220,12 @@ if __name__ == "__main__":
     
     # coco_dir = 'E:/dataset/teeth_seg_3d/render_2dset2'
     # coco_dir = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2'
-    coco_dir = '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle/Teeth Segmentation JSON/d2/'
+    # coco_dir = '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle/Teeth Segmentation JSON/d2/'
     # 'E:\dataset\reverse_tomosynthesis\kaggle_xrays\xray_teeth_seg_kaggle\Teeth Segmentation JSON\d2'
     # coco_dir = '/data1/jooyonglee/teeth_segmentation3d/render_set/teeth_seg_3d/'
-    torch.cuda.set_device(torch.device('cuda:5'))
+    torch.cuda.set_device(torch.device('cuda:4'))
     # train_from_teeth_dir(coco_dir)
-    train_from_xray_teeth_dir(coco_dir)
+    train_from_xray_teeth_dir()
 
     # coco_dir = 'E:/dataset/coco/base'
     # train_from_coco_dir(coco_dir)
