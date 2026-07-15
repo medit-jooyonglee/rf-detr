@@ -18,6 +18,7 @@
 Train and eval functions used in main.py
 """
 import math
+import os
 import sys
 from typing import Iterable
 import random
@@ -127,7 +128,17 @@ def train_one_epoch(
 
             with autocast(**get_autocast_args(args)):
                 outputs = model(new_samples, new_targets)
-                loss_dict = criterion(outputs, new_targets)
+                
+                # draw_preditions_boxes(samples, outputs)
+
+
+                try:
+                    loss_dict = criterion(outputs, new_targets) 
+                except Exception as e:
+                    print("Error in loss computation:", e)
+                    print("Outputs keys:", outputs.keys())
+                    print("Targets:", new_targets)
+                    raise e
                 weight_dict = criterion.weight_dict
                 losses = sum(
                     (1 / args.grad_accum_steps) * loss_dict[k] * weight_dict[k]
@@ -276,6 +287,9 @@ def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=N
         # Add autocast for evaluation
         with autocast(**get_autocast_args(args)):
             outputs = model(samples)
+            
+            if getattr(args, 'eval_save', False):
+                draw_preditions_boxes(samples, outputs)
 
         if args.fp16_eval:
             for key in outputs.keys():
@@ -341,3 +355,45 @@ def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=N
             results_json = coco_extended_metrics(coco_evaluator.coco_eval["segm"])
             stats["coco_eval_masks"] = coco_evaluator.coco_eval["segm"].stats.tolist()
     return stats, coco_evaluator
+
+
+def draw_preditions_boxes(new_samples, outputs):
+    from trainer import torch_utils
+    from rfdetr.datasets.teeth import draw_bboxes
+    from trainer import utils_numpy, image_utils, time_strftime
+    import cv2
+    inputs_arrays  = torch_utils.to_numpy(new_samples.tensors)
+    boxes = torch_utils.to_numpy(outputs['pred_boxes'])
+    logits = torch_utils.to_numpy(outputs['pred_logits'].to(torch.float32))
+    label = np.squeeze(np.argmax(logits, axis=-1))
+    boxes = np.squeeze(boxes)
+    # boxes = boxes[label > 0]
+    num_batch = inputs_arrays.shape[0]
+    # np.squeeze(np.argmax(logtis, axis=-1))
+    width, height = inputs_arrays.shape[-2:][::-1]
+    images = np.transpose(inputs_arrays, [0, 2, 3, 1])
+    
+    os.makedirs('results', exist_ok=True)
+    def denorm_boxes_to_xyxy(boxes, img_w, img_h):
+        x_c, y_c, w, h = np.split(boxes, 4, axis=1)
+        x0 = (x_c - 0.5 * w) * img_w
+        y0 = (y_c - 0.5 * h) * img_h
+        x1 = (x_c + 0.5 * w) * img_w
+        y1 = (y_c + 0.5 * h) * img_h
+        return np.concatenate([x0, y0, x1, y1], axis=1)
+    
+    colors = np.array([[0, 255, 0], [255, 0, 0], [0, 0, 255], [255, 255, 0], [0, 255, 255], [255, 0, 255], [128, 128, 128], [128, 0, 0], [0, 128, 0]])
+    num_classes = 10
+    for i in range(num_batch):
+        
+        image = image_utils.to_magnitude_images(images[i])
+        
+        posit = np.logical_and(label[i] > 0, label[i] < num_classes)
+        posit_boxes = boxes[i][posit]
+        posit_labels = label[i][posit]
+        boxes_xy = denorm_boxes_to_xyxy(posit_boxes, width, height)
+        draw_bboxes(image, boxes_xy, colors=colors[posit_labels])
+        os.makedirs('results', exist_ok=True)
+        
+        cv2.imwrite(f'results/bounding_draw_{time_strftime()}.png', image.astype(np.uint8))
+        

@@ -64,10 +64,13 @@ def train_from_coco_dir(coco_dir: str):
 
 def train_from_teeth_dir(teeth_dir: str):
     rf_detr = RFDETRBase(
-        segmentation_head=True,
-    patch_size=8,
+        # segmentation_head=True,
+        patch_size=8,
         num_windows=4,
-
+        num_queries=25,
+        group_detr=5,
+        num_select=20,
+        pretrain_weights="output/checkpoint0099.pth",
     )
     device_supports_cuda = torch.cuda.is_available()
     
@@ -80,15 +83,58 @@ def train_from_teeth_dir(teeth_dir: str):
         batch_size=1,
         num_workers=0,
         square_resize=False,
-        segmentation_head=True,
+        # segmentation_head=True,
         mask_ce_loss_coef=5.,
         mask_dice_loss_coef=5.,
         mask_point_sample_ratio=16,
         grad_accum_steps=1,
         coco_evaluate=False,
         multi_scale=False,
-        num_queries=30,
+        num_queries=25,
+        num_select=20,
     )
+    
+    
+
+def train_from_xray_teeth_dir(xray_teeth_dir: str):
+    rf_detr = RFDETRBase(
+        # segmentation_head=True,
+        patch_size=16,
+        num_windows=4,
+        num_queries=30,
+        group_detr=5,
+        num_select=30,
+        # patch_size=24,
+        # num_channels=1,
+        # eval=True,
+        num_classes=3,
+        pretrain_weights="output/checkpoint0099.pth",
+    )
+    device_supports_cuda = torch.cuda.is_available()
+    
+    rf_detr.train(
+        dataset_dir=xray_teeth_dir,
+        epochs=100,
+        device="cuda" if device_supports_cuda else "cpu",
+        dataset_file='xray_teeth',
+        # coco_path=teeth_dir,
+        batch_size=4,
+        num_workers=0,
+        square_resize=False,
+        # segmentation_head=True,
+        mask_ce_loss_coef=5.,
+        mask_dice_loss_coef=5.,
+        mask_point_sample_ratio=16,
+        grad_accum_steps=1,
+        coco_evaluate=False,
+        multi_scale=False,
+        num_queries=25,
+        num_select=20,
+        pretrain_weights="output/checkpoint0099.pth",
+        # eval_save=True,
+        eval=True,
+    )
+
 
 def trainer():
     parser = argparse.ArgumentParser()
@@ -124,9 +170,12 @@ if __name__ == "__main__":
     # trainer()
     
     # coco_dir = 'E:/dataset/teeth_seg_3d/render_2dset2'
-    coco_dir = '/data1/jooyonglee/teeth_segmentation3d/render_set/teeth_seg_3d/'
-    torch.cuda.set_device(torch.device('cuda:4'))
-    train_from_teeth_dir(coco_dir)
+    coco_dir = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2'
+    # 'E:\dataset\reverse_tomosynthesis\kaggle_xrays\xray_teeth_seg_kaggle\Teeth Segmentation JSON\d2'
+    # coco_dir = '/data1/jooyonglee/teeth_segmentation3d/render_set/teeth_seg_3d/'
+    torch.cuda.set_device(torch.device('cuda:0'))
+    # train_from_teeth_dir(coco_dir)
+    train_from_xray_teeth_dir(coco_dir)
 
     # coco_dir = 'E:/dataset/coco/base'
     # train_from_coco_dir(coco_dir)

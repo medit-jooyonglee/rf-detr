@@ -99,7 +99,12 @@ class HungarianMatcher(nn.Module):
         alpha = 0.25
         gamma = 2.0
         
-        # neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())
+        num_total_targets = sum(len(v["labels"]) for v in targets)
+        if num_total_targets == 0:
+        
+            return [(torch.as_tensor([], dtype=torch.int64), 
+                    torch.as_tensor([], dtype=torch.int64)) for _ in range(bs)]
+            # neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())
         # pos_cost_class = alpha * ((1 - out_prob) ** gamma) * (-(out_prob + 1e-8).log())
         # we refactor these with logsigmoid for numerical stability
         neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-F.logsigmoid(-flat_pred_logits))

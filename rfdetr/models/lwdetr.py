@@ -21,6 +21,7 @@ LW-DETR model and criterion classes
 """
 import copy
 import math
+from operator import pos
 from typing import Callable
 import torch
 import torch.nn.functional as F
@@ -327,8 +328,9 @@ class SetCriterion(nn.Module):
 
         idx = self._get_src_permutation_idx(indices)
         target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
-
+        # is_empty = 
         if self.ia_bce_loss:
+            
             alpha = self.focal_alpha
             gamma = 2 
             src_boxes = outputs['pred_boxes'][idx]
@@ -345,12 +347,15 @@ class SetCriterion(nn.Module):
 
             pos_ind=[id for id in idx]
             pos_ind.append(target_classes_o)
+            
 
-            t = prob[pos_ind].pow(alpha) * pos_ious.pow(1 - alpha)
-            t = torch.clamp(t, 0.01).detach()
-
-            pos_weights[pos_ind] = t.to(pos_weights.dtype)
-            neg_weights[pos_ind] = 1 - t.to(neg_weights.dtype)
+            try:
+                t = prob[pos_ind].pow(alpha) * pos_ious.pow(1 - alpha)
+                t = torch.clamp(t, 0.01).detach()
+                pos_weights[pos_ind] = t.to(pos_weights.dtype)
+                neg_weights[pos_ind] = 1 - t.to(neg_weights.dtype)
+            except Exception as e:
+                pass
             # a reformulation of the standard loss_ce = - pos_weights * prob.log() - neg_weights * (1 - prob).log()
             # with a focus on statistical stability by using fused logsigmoid
             loss_ce = neg_weights * src_logits - F.logsigmoid(src_logits) * (pos_weights + neg_weights)

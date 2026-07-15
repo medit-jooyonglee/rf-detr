@@ -60,8 +60,9 @@ class CocoEvaluator(object):
                     with contextlib.redirect_stdout(devnull):
                         coco_dt = COCO.loadRes(self.coco_gt, results) if results else COCO()
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 coco_dt = None
-                pass
             
             
             coco_eval = self.coco_eval[iou_type]

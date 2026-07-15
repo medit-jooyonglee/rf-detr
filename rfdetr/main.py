@@ -99,7 +99,10 @@ class Model:
                 self.class_names = checkpoint['args'].class_names
                 
             checkpoint_num_classes = checkpoint['model']['class_embed.bias'].shape[0]
-            if checkpoint_num_classes != args.num_classes + 1:
+            head_num_classes_mismatch = checkpoint_num_classes != args.num_classes + 1
+            if head_num_classes_mismatch:
+                # temporarily resize our head to match the checkpoint so the state dict
+                # loads cleanly; it gets resized back to args.num_classes below.
                 self.reinitialize_detection_head(checkpoint_num_classes)
             # add support to exclude_keys
             # e.g., when load object365 pretrain, do not load `class_embed.[weight, bias]`
@@ -132,6 +135,11 @@ class Model:
             except Exception as e:
                 print(f"Failed to load pretrain weights: {e}")
                 # raise e
+
+            if head_num_classes_mismatch:
+                # resize the (now checkpoint-loaded) head down/up to the class count
+                # actually requested, using the loaded weights as a warm start.
+                self.reinitialize_detection_head(args.num_classes + 1)
 
         if args.backbone_lora:
             print("Applying LORA to backbone")
@@ -342,6 +350,7 @@ class Model:
 
             model.train()
             criterion.train()
+            train_stats = {}
             train_stats = train_one_epoch(
                 model, criterion, lr_scheduler, data_loader_train, optimizer, device, epoch,
                 effective_batch_size, args.clip_max_norm, ema_m=self.ema_m, schedules=schedules, 

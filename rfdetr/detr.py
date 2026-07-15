@@ -140,6 +140,10 @@ class RFDETR:
             class_names = ["tooth"]
             class_names = TEETH_TYPE_CLASSES
             num_classes = 9
+        elif config.dataset_file == "xray_teeth":
+            class_names = ["tooth-gum"]
+            class_names = np.array(['gum', 'upper', 'lower'])
+            num_classes = 3
         else:
             raise ValueError(f"Invalid dataset file: {config.dataset_file}")
 
