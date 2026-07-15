@@ -229,6 +229,15 @@ label2fdi2[np.arange(fdi_sort.size)] = np.concatenate([
     [0], np.full([16], 1, dtype=np.int64), np.full([16], 2, dtype=np.int64)
 ])
 
+def label_to_fdi(labels, num_classes:int=32):
+    if num_classes == 32:
+        mapping = np.arange(256, dtype=np.int64)
+        mapping[np.arange(fdi_sort.size)] = fdi_sort
+        return mapping[labels]
+    else:
+        return labels
+        
+        # return label2fdi2[labels]
 
 def label_mapping(labels, num_classes:int):
     if num_classes == 3:
@@ -236,6 +245,8 @@ def label_mapping(labels, num_classes:int):
     elif num_classes == 33:
         # return labels
         return labels
+    else:
+        raise NotImplementedError(f'num_classes {num_classes} is not supported for label mapping')
         # return label2fdi[labels]
 
 
@@ -265,7 +276,7 @@ class XrayPnoaramicInstance(XrayPnoramic):
             # in case of rf-detr num_classes
             num_classes = num_classes + 1
         assert num_classes in [3, 33], 'upper & lower 3 or all intsnace classe 33'
-        self.num_classes = num_classes + 1
+        self.num_classes = num_classes
         
                 #          name='train',
                 #  splits={},
