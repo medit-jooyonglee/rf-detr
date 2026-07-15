@@ -2,7 +2,7 @@ roboflow
 supervision
 peft
 pydantic
-pycocotols
+pycocotools
 pytorch_utils
 transformers==4.57.3
 
