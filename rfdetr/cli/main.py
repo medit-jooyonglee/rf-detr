@@ -96,9 +96,28 @@ def train_from_teeth_dir(teeth_dir: str):
     
     
 
-def train_from_xray_teeth_dir(xray_teeth_dir: str):
+
+def get_my_arg_parse():
+    parser = argparse.ArgumentParser()
     
-    args = get_arg_parse()
+    parser.add_argument("--coco_dir", type=str, default='/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle/Teeth Segmentation JSON/d2/')
+    parser.add_argument("--num_classes", type=int, required=False, default=32)
+    # parser.add_argument("--project_name", type=str, required=False, default=None)
+    parser.add_argument("--annot_file", type=str, required=False, default='../../xray_coco_33.json')
+    parser.add_argument('--eval', action='store_true', help='Run evaluation after training')
+    parser.add_argument('--eval_save', action='store_true', help='Run save results after training')
+    
+    args = parser.parse_args()
+    return args
+
+
+def train_from_xray_teeth_dir():
+    
+    args = get_my_arg_parse()
+    dataset_dir = args.coco_dir
+    num_classes = args.num_classes
+    annot_file = args.annot_file
+    
     rf_detr = RFDETRBase(
         # segmentation_head=True,
         patch_size=16,
@@ -109,14 +128,18 @@ def train_from_xray_teeth_dir(xray_teeth_dir: str):
         # patch_size=24,
         # num_channels=1,
         # eval=True,
-        num_classes=32,
+        # num_classes=32,
+        num_classes=num_classes,
         
         # pretrain_weights="output/checkpoint0099.pth",
+        # pretrain_weights="output/xray_teeth/checkpoint0059.pth",
+        pretrain_weights='output/xray_teeth33/checkpoint0039.pth'
+        
     )
     device_supports_cuda = torch.cuda.is_available()
     
     rf_detr.train(
-        dataset_dir=xray_teeth_dir,
+        dataset_dir=dataset_dir,
         epochs=100,
         device="cuda" if device_supports_cuda else "cpu",
         dataset_file='xray_teeth',
@@ -131,13 +154,18 @@ def train_from_xray_teeth_dir(xray_teeth_dir: str):
         grad_accum_steps=1,
         coco_evaluate=False,
         multi_scale=False,
-        num_queries=25,
-        num_select=20,
-        output_dir='output/xray_teeth33',
-        annot_file='../../xray_coco_33.json',
+        num_queries=50,
+        num_select=35,
+        # output_dir='output/xray_teeth33',
+        # annot_file='../../xray_coco_33.json',
+        # annot_file='../../xray_coco_33.json',
+        annot_file=annot_file,
+        # annot_file=''
+        # annot_file='../../xray_coco.json',
         # pretrain_weights="output/checkpoint0099.pth",
         # eval_save=True,
         # eval=True,
+        **args.__dict__
     )
 
 
@@ -175,7 +203,7 @@ def trainer():
 
     train_from_rf_project(project, args.dataset_version)
 
-
+# cli/main.py -> rfdetr/main.py -> rfdetr/enggine.py::train_one_epocch // evaluate
 if __name__ == "__main__":
     # trainer()
     

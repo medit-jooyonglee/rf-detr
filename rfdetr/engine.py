@@ -360,12 +360,16 @@ def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=N
 def draw_preditions_boxes(new_samples, outputs):
     from trainer import torch_utils
     from rfdetr.datasets.teeth import draw_bboxes
-    from trainer import utils_numpy, image_utils, time_strftime
+    from trainer import utils_numpy, image_utils, time_strftime, vtk_utils
+    from rfdetr.datasets.xraypanoramic import label_to_fdi
     import cv2
     inputs_arrays  = torch_utils.to_numpy(new_samples.tensors)
     boxes = torch_utils.to_numpy(outputs['pred_boxes'])
     logits = torch_utils.to_numpy(outputs['pred_logits'].to(torch.float32))
-    label = np.squeeze(np.argmax(logits, axis=-1))
+    pred_label = np.squeeze(np.argmax(logits, axis=-1))
+    label = fdi = label_to_fdi(pred_label)
+    
+    
     boxes = np.squeeze(boxes)
     # boxes = boxes[label > 0]
     num_batch = inputs_arrays.shape[0]
@@ -382,18 +386,20 @@ def draw_preditions_boxes(new_samples, outputs):
         y1 = (y_c + 0.5 * h) * img_h
         return np.concatenate([x0, y0, x1, y1], axis=1)
     
-    colors = np.array([[0, 255, 0], [255, 0, 0], [0, 0, 255], [255, 255, 0], [0, 255, 255], [255, 0, 255], [128, 128, 128], [128, 0, 0], [0, 128, 0]])
-    num_classes = 10
+    colors = vtk_utils.get_teeth_color_table(normalize=False)
+    # colors = np.array([[0, 255, 0], [255, 0, 0], [0, 0, 255], [255, 255, 0], [0, 255, 255], [255, 0, 255], [128, 128, 128], [128, 0, 0], [0, 128, 0]])
+    # num_classes = 10
     for i in range(num_batch):
         
         image = image_utils.to_magnitude_images(images[i])
         
-        posit = np.logical_and(label[i] > 0, label[i] < num_classes)
+        # posit = np.logical_and(label[i] > 0, label[i] < num_classes)
+        posit = label[i] > 0
         posit_boxes = boxes[i][posit]
         posit_labels = label[i][posit]
         boxes_xy = denorm_boxes_to_xyxy(posit_boxes, width, height)
         draw_bboxes(image, boxes_xy, colors=colors[posit_labels])
         os.makedirs('results', exist_ok=True)
         
-        cv2.imwrite(f'results/bounding_draw_{time_strftime()}.png', image.astype(np.uint8))
+        cv2.imwrite(f'results/bounding_draw_{time_strftime()}.png', image.astype(np.uint8)[..., ::-1])
         
