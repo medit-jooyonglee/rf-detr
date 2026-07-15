@@ -261,8 +261,11 @@ class XrayPnoaramicInstance(XrayPnoramic):
                               path_lists=[img_folder],
                               
                               **kwargs)
+        if num_classes in [2, 32]:
+            # in case of rf-detr num_classes
+            num_classes = num_classes + 1
         assert num_classes in [3, 33], 'upper & lower 3 or all intsnace classe 33'
-        self.num_classes = num_classes
+        self.num_classes = num_classes + 1
         
                 #          name='train',
                 #  splits={},
@@ -641,7 +644,7 @@ class XrayPnoaramicInstanceCoco(CocoDetection):
         CocoDetection.__init__(self, img_folder, annot_file, transforms, include_masks)
         self.include_masks = include_masks
         self.base_datset = XrayPnoaramicInstance(
-            img_folder,
+            img_folder, **kwargs
         )
         
     def __len__(self):
@@ -883,7 +886,14 @@ def boxes_to_xyxy(boxes, size):
 def build(image_set, args, resolution):
     img_folder = str(args.dataset_dir)
     # annotation file is builed by functoin . see teeth.py::test_build_teethdsata
-    annot_file = os.path.join(img_folder, '../../xray_coco.json')
+    annot_file = getattr(args, 'annot_file', '../../xray_coco.json')
+    if os.path.exists(annot_file):
+        pass
+    else:
+        annot_file = os.path.join(img_folder, annot_file)
+        assert os.path.exists(annot_file), f'annotation file not found: {annot_file}'
+    # annot_file = 
+    # annot_file
     args_dict = dict(args.__dict__)
 
     dataset = XrayPnoaramicInstanceCoco(
@@ -891,7 +901,8 @@ def build(image_set, args, resolution):
         annot_file=annot_file,
         transforms=None,
         name=image_set,
-        **args_dict
+        num_classes=getattr(args, 'num_classes', 2),
+        # **args_dict
     )
     return dataset
 
