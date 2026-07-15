@@ -230,7 +230,7 @@ label2fdi2[np.arange(fdi_sort.size)] = np.concatenate([
 ])
 
 def label_to_fdi(labels, num_classes:int=32):
-    if num_classes == 32:
+    if num_classes in [32, 33]:
         mapping = np.arange(256, dtype=np.int64)
         mapping[np.arange(fdi_sort.size)] = fdi_sort
         return mapping[labels]
@@ -336,7 +336,7 @@ class XrayPnoaramicInstance(XrayPnoramic):
         return target_label, target_offset
 
     
-    def parse_item_coco(self, index, norm_bbox=True, box_format: Literal['xcycwh', 'xywh']='xcycwh'):
+    def parse_item_coco(self, index, norm_bbox=True, box_format: Literal['xcycwh', 'xywh']='xcycwh', return_raw_annotation=False):
         img_file = self.source_files[index]
         mask_file = self.gt_files[index]
         
@@ -384,7 +384,7 @@ class XrayPnoaramicInstance(XrayPnoramic):
             return image
         
         
-        def draw_segmentation(image, polygons, color=(255, 255, 255)):
+        def draw_segmentation(image, polygons, color=(255, 255, 255), scale=None):
             """
             image: 그릴 대상 이미지
             polygons: [[x1, y1], [x2, y2], ...] 형태의 좌표 리스트 (배열)
@@ -392,9 +392,15 @@ class XrayPnoaramicInstance(XrayPnoramic):
             """
             # OpenCV는 좌표를 (N, 1, 2) 형태의 int32 배열로 요구합니다.
             pts = np.array(polygons, dtype=np.int32).reshape((-1, 1, 2))
-            
+            if scale is not None:
+                pts = (pts * scale).astype(np.int32)
+            # if image.ndim == 3:
+                
             # 내부 채우기 (이미지 자체에 수정이 가해짐)
-            cv2.fillPoly(image, [pts], color=color)
+                cv2.fillPoly(image, [pts], color=color)
+            elif image.ndim == 2:
+                cv2.fillPoly(image, [pts], color=color[0])
+                
             
             return image
 
@@ -402,7 +408,7 @@ class XrayPnoaramicInstance(XrayPnoramic):
         annot_data = extract_annotation_info(mask_file)
         
         keys = ['class_title', 'class_id', 'bbox', 'segmentation']
-        seg_polygos = [np.array([obj[key] for key in keys], dtype=object) for obj in annot_data]
+        # seg_polygos = [np.array([obj[key] for key in keys], dtype=object) for obj in annot_data]
         # *w, h, w, h format
         bboxes = np.array([obj['bbox'] for obj in annot_data], dtype=np.float32)
         # ()
@@ -423,16 +429,7 @@ class XrayPnoaramicInstance(XrayPnoramic):
         scale_wh = np.array(cv_size) / np.array(src.shape[::-1])
         
         
-        # src_rsz.shape[:2] * scale_wh
-        # target_rsz = cv2.resize(target, cv_size, interpolation=cv2.INTER_NEAREST)
-        
-        # map_kaggle_to_label =self.mapping[self.meta_kaggle_mapping]
-        
-        # print('raw - label', np.unique(target_rsz))
-        # mapping_target = map_kaggle_to_label[target_rsz]
-        # # 
-                # mapping_target = self.meta_kaggle_mapping[target]
-        # proc_target = self.preprocesing_target_edge_binary(mapping_target)
+
         debug = False
         if debug:
             
@@ -459,28 +456,7 @@ class XrayPnoaramicInstance(XrayPnoramic):
             os.makedirs('outputs/results', exist_ok=True)
             cv2.imwrite(f'outputs/results/{time_strftime()}.png', drawing[..., ::-1])
         
-        # indices = utils_numpy.unique_indices(mapping_target.ravel())
-        # indices.pop(0, None)
         
-        # # indices
-        # bboxes = []
-        # labels = []
-        # scale = 1.15
-        # for k, v in indices.items():
-        #     ij = np.unravel_index(v, mapping_target.shape)
-        #     bbox = np.stack(ij, axis=-1)
-            
-        #     vmin, vmax = np.min(bbox, axis=0), np.max(bbox, axis=0)
-        #     center = (vmin + vmax) / 2
-        #     ext = (vmax - vmin) * scale / 2
-        #     vmin0, vmax0 = center - ext, center + ext
-        #     scale_bboxes = np.concatenate([vmin0, vmax0])
-            
-        #     bboxes.append(scale_bboxes)
-        #     labels.append(k)
-            
-        # bboxes = np.array(bboxes)
-        # labels = np.array(labels)
         if bboxes.size == 0:
             # num_negat = np.random.uniform()
             num_negat = 10
@@ -493,13 +469,32 @@ class XrayPnoaramicInstance(XrayPnoramic):
 
         # shape = input_img.shape[:2]
         # box_shape = np.array([w, h, w, h])
-        
+        polygon_segmentation = []
         if self.include_masks:
-            raise NotImplementedError("Mask generation from polygons is not implemented yet.")
-            # (num_instances, height, width)
-            masks = labels.reshape(
-                [labels.size, 1, 1]) == mapping_target[None]
-        
+            
+            polygons = [annot['segmentation'] for annot in annot_data]
+            # for 
+            if polygons:
+                # masks = np.zeros([bboxes.shape[0], *src_rsz.shape[:2]], dtype=np.uint8)
+                masks = np.zeros([bboxes.shape[0], *src_rsz.shape[:2]], dtype=np.uint8)
+                
+
+                for i, poly in enumerate(polygons):
+                    
+                    polygon_segmentation.append(
+                        np.array(poly).ravel().tolist()
+                    )
+                    draw_segmentation(masks[i], poly, color=(255, 255, 255), scale=scale_wh)
+                    # print(i, np.sum(res > 0))
+                
+                masks = masks.astype(np.bool_)
+                if debug:
+                    for v in range(masks.shape[0]):
+                        cv2.imwrite(f'outputs/results/mask_{v}.png', masks[v])
+            else:
+                masks = np.zeros([0, *src_rsz.shape[:2]], dtype=np.bool_)
+                
+
             area = masks.reshape(masks.shape[0], -1).sum(axis=1) if masks.size > 0 else np.zeros([0])
         else:
             box_area = (bboxes[:, 2] - bboxes[:, 0]) * (bboxes[:, 3] - bboxes[:, 1])
@@ -538,6 +533,7 @@ class XrayPnoaramicInstance(XrayPnoramic):
             area=area,
             is_crowd=np.zeros([bboxes.shape[0]], dtype=np.int64),
             # masks=masks,
+            segmentation=polygon_segmentation,
             orig_size=orig_shape,
             size=shape,
         )
@@ -547,7 +543,10 @@ class XrayPnoaramicInstance(XrayPnoramic):
         # src_rsz_permute = np.transpose(src_rsz, [2, 0, 1]).copy()
         # on color
         src_rsz = (src_rsz / 255)[None]
+        # if return_raw_annotation:
         return src_rsz, annot
+        # else:
+            # return src_rsz, annot
 
         
     def coco_json_export(self, base_dir='', debug_break=-1):
@@ -598,18 +597,25 @@ class XrayPnoaramicInstance(XrayPnoramic):
                 "height": width,
 
             })
-            keys = ['boxes', 'labels', 'area', 'is_crowd']
-            bboxes, labels, areas, iscrowd = [target[key] for key in keys]
+            keys = ['boxes', 'labels', 'area', 'is_crowd', 'segmentation']
+            bboxes, labels, areas, iscrowd, segmentation = [target[key] for key in keys]
 
-            for box, label, area, crowd in zip(bboxes, labels, areas, iscrowd):
-                annotations.append({
+            for i, (box, label, area, crowd) in enumerate(zip(bboxes, labels, areas, iscrowd)):
+                
+
+                i_annot = {
                     "id": annotation_id,
                     "image_id": image_id,
                     "category_id": int(label),
                     "bbox": box.tolist(),  # [x, y, width, height]
                     "area": float(area),
                     "iscrowd": int(crowd),
-                })
+                }
+                if len(segmentation) == len(bboxes):
+                    seg = segmentation[i]
+                    i_annot["segmentation"] = [seg]
+                
+                annotations.append(i_annot)
                 annotation_id += 1
             if debug_break > 0 and debug_break > 20:
                 # logg
@@ -785,13 +791,14 @@ def test_build_coco_json():
     # dataset = XrayPnoaramicInstance(img_folder, '', None, True)
     
     num_classes = 33
+    include_masks = True
     dataset = XrayPnoaramicInstance(
         img_folder=
             'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2'
         ,
         num_classes=num_classes,
         # stride=4,
-        
+        include_masks=include_masks,
     )
     assert len(dataset) > 0
     
