@@ -674,6 +674,8 @@ class XrayPnoaramicInstanceCoco(CocoDetection):
     def __getitem__(self, index):
         item = self.base_datset.parse_item_coco(index)
         # img, target = torch_utils.data_convert(item, device='cpu')
+        img, target = item
+        target.pop('segmentation', None)        
         img, target = torch_utils.data_convert(item, device='cpu')
         if self._transforms is not None:
             img, target = self._transforms(img, target)

@@ -109,7 +109,7 @@ def get_my_arg_parse():
     parser.add_argument('--eval', action='store_true', help='Run evaluation after training')
     parser.add_argument('--eval_save', action='store_true', help='Run save results after training')
     parser.add_argument('--segmentation_head', action='store_true',
-                        default=True, 
+                        # default=True, 
                         help='Run save results after training')
     
     args = parser.parse_args()
