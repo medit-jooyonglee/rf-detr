@@ -143,11 +143,12 @@ class RFDETR:
         elif config.dataset_file == "xray_teeth":
             class_names = ["tooth-gum"]
             class_names = np.array(['gum', 'upper', 'lower'])
-            num_classes = 3
+            # we foolow model setting.
+            num_classes = self.model_config.num_classes
         else:
             raise ValueError(f"Invalid dataset file: {config.dataset_file}")
 
-        if self.model_config.num_classes != num_classes:
+        if num_classes is not None and self.model_config.num_classes != num_classes:
             self.model.reinitialize_detection_head(num_classes)
         
         train_config = config.dict()
