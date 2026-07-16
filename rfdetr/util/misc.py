@@ -289,6 +289,14 @@ def get_sha():
 def collate_fn(batch):
     batch = list(zip(*batch))
     batch[0] = nested_tensor_from_tensor_list(batch[0])
+    _, _, padded_h, padded_w = batch[0].tensors.shape
+    for target in batch[1]:
+        if "masks" in target:
+            masks = target["masks"]
+            pad_h = padded_h - masks.shape[-2]
+            pad_w = padded_w - masks.shape[-1]
+            if pad_h > 0 or pad_w > 0:
+                target["masks"] = torch.nn.functional.pad(masks, (0, pad_w, 0, pad_h))
     return tuple(batch)
 
 

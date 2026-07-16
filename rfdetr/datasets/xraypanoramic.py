@@ -11,7 +11,7 @@ from scipy.interpolate import RegularGridInterpolator
 from torch.utils.data.dataloader import DataLoader, Dataset
 from typing import Dict, List, Tuple, Optional, Union, Literal
 from trainer import diskmanager, get_logger, vtk_utils, timefn, image_utils
-from trainer import vtk_utils, geometry_numpy, get_logger, time_strftime, utils_numpy, torch_utils
+from trainer import vtk_utils, geometry_numpy, get_logger, time_strftime, utils_numpy, torch_utils, get_logger
 from trainer.image_utils import cv2_imread, cv2_imwrite
 # from reversereg.preproc.sampler import cv2_imread, cv2_imwrite, to_rgba, blend_images
 from rfdetr.datasets.coco import CocoDetection
@@ -272,7 +272,9 @@ class XrayPnoaramicInstance(XrayPnoramic):
                               path_lists=[img_folder],
                               
                               **kwargs)
+        logger = get_logger()
         if num_classes in [2, 32]:
+            logger.info(f'in case of RF-DETR. 0, background class is not included in num_classes {num_classes}. It will be added automatically.')
             # in case of rf-detr num_classes
             num_classes = num_classes + 1
         assert num_classes in [3, 33], 'upper & lower 3 or all intsnace classe 33'
@@ -822,11 +824,15 @@ def test_build_coco_json():
         
 def test_load_coco_dataset():
     
-        
-    img_folder = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2'
+    from trainer import get_logger
+    
+    logger = get_logger()
+    # img_folder = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2'
+    # img_folder = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2'
+    path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle'
     # ann_file = ''
     # dataset = XrayPnoaramicInstanceCoco(img_folder, '', None, True)
-    path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle'
+    # path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle'
     # xray_coco.json'
     
     dataset = XrayPnoaramicInstanceCoco(
@@ -836,11 +842,14 @@ def test_load_coco_dataset():
         ,
         os.path.join(path, 'xray_coco.json'),
         None,
-        False
+        include_masks=True
     )
     assert len(dataset) > 0
-    
-    for _ in range(len(dataset)):
+    shape_stats = {
+        'inputs': set(),
+        'targets': set()
+    }
+    for _ in tqdm.tqdm(range(len(dataset))):
         img, target = dataset[_]
         print(torch_utils.get_shape([img, target]))
 
@@ -852,24 +861,35 @@ def test_load_coco_dataset():
         
         target_bboxes = target['boxes']
         
+        if target_bboxes.size == 0:
+            logger.error(f"No bounding boxes found for index {_} in dataset.")
+        
+        segmentation = target.get('masks')
+        if segmentation is not None:
+            shape_stats['targets'].add(segmentation.shape[1:])
+        shape_stats['inputs'].add(img.shape[1:])
+        
+        
         denorm_bboxes = boxes_to_xyxy(target_bboxes, size[::-1])
         
         drawing = cv2.cvtColor(img[0]*255, cv2.COLOR_GRAY2BGR)
         # denorm_bboxes = denorm_bboxes.reshape([-1, 2]).clip(0, size)
         denorm_bboxes_i = denorm_bboxes.astype(np.int32)
         
-        target_fdi = label_mapping(target_label)
+        target_fdi = label_to_fdi(target_label)
         
         from trainer import vtk_utils
         colors_fdis = vtk_utils.get_teeth_color_table(normalize=False)
         target_colors = colors_fdis[target_fdi]
         
-        draw_bboxes(drawing, denorm_bboxes_i, target_colors, xy_format='xy')
-        cv2.imwrite(f'outputs/result/xray_{_}.png', drawing[..., ::-1])
+        # draw_bboxes(drawing, denorm_bboxes_i, target_colors, xy_format='xy')
+        # cv2.imwrite(f'outputs/result/xray_{_}.png', drawing[..., ::-1])
         # for box in denorm_bboxes_i:
         #     cv2.rectangle
         
-
+    print(f"Input shapes: {shape_stats['inputs']}")
+    print(f"Target shapes: {shape_stats['targets']}")
+    
 def draw_bboxes(image, bboxes, colors=None, xy_format='yx'):
     bboxes = np.asarray(bboxes)
     bboxes = bboxes.reshape([-1, 4])
@@ -935,6 +955,6 @@ def build(image_set, args, resolution):
         
 if __name__ == '__main__':
     # main_xraypanoramic_instance()
-    test_build_coco_json()
+    # test_build_coco_json()
     
-    # test_load_coco_dataset()
+    test_load_coco_dataset()

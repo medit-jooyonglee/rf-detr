@@ -117,7 +117,12 @@ def train_one_epoch(
             with torch.inference_mode():
                 samples.tensors = F.interpolate(samples.tensors, size=scale, mode='bilinear', align_corners=False)
                 samples.mask = F.interpolate(samples.mask.unsqueeze(1).float(), size=scale, mode='nearest').squeeze(1).bool()
-        run_model = True
+                if args.segmentation_head:
+                    for t in targets:
+                        if "masks" in t:
+                            t["masks"] = F.interpolate(
+                                t["masks"].unsqueeze(1).float(), size=scale, mode='nearest'
+                            ).squeeze(1) > 0.5
         for i in range(args.grad_accum_steps):
             start_idx = i * sub_batch_size
             final_idx = start_idx + sub_batch_size
@@ -128,22 +133,7 @@ def train_one_epoch(
 
             with autocast(**get_autocast_args(args)):
                 outputs = model(new_samples, new_targets)
-                
-                # draw_preditions_boxes(samples, outputs)
-
-
-                try:
-                    loss_dict = criterion(outputs, new_targets) 
-                except Exception as e:
-                    print("Error in loss computation:", e)
-                    print("Outputs keys:", outputs.keys())
-                    # failed = True
-                    run_model = False
-                    break
-                    # print("Targets:", new_targets)
-                    # continue  # Skip this batch and continue with the next one
-                    # 
-                    # raise e
+                loss_dict = criterion(outputs, new_targets)
                 weight_dict = criterion.weight_dict
                 losses = sum(
                     (1 / args.grad_accum_steps) * loss_dict[k] * weight_dict[k]
@@ -153,8 +143,6 @@ def train_one_epoch(
 
 
             scaler.scale(losses).backward()
-        if not run_model:
-            break
         # reduce losses over all GPUs for logging purposes
         loss_dict_reduced = utils.reduce_dict(loss_dict)
         loss_dict_reduced_unscaled = {
@@ -311,14 +299,7 @@ def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=N
                 else:
                     outputs[key] = outputs[key].float()
 
-        try:
-            loss_dict = criterion(outputs, targets)
-        except Exception as e:
-            print("Error in loss computation:", e)
-            print("Outputs keys:", outputs.keys())
-            continue  # Skip this batch and continue with the next one
-            # print("Targets:", targets)
-            # raise e
+        loss_dict = criterion(outputs, targets)
         weight_dict = criterion.weight_dict
 
         # reduce losses over all GPUs for logging purposes
