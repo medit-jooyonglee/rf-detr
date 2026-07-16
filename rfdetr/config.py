@@ -43,7 +43,7 @@ class RFDETRBaseConfig(ModelConfig):
     """
     The configuration for an RF-DETR Base model.
     """
-    encoder: Literal["dinov2_windowed_small", "dinov2_windowed_base"] = "dinov2_windowed_small"
+    encoder: Literal["dinov2_windowed_tiny", "dinov2_windowed_small", "dinov2_windowed_base"] = "dinov2_windowed_small"
     hidden_dim: int = 256
     patch_size: int = 14
     num_windows: int = 4

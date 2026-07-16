@@ -24,6 +24,7 @@ size_to_width = {
 }
 
 size_to_config = {
+    "tiny": "dinov2_tiny.json",
     "small": "dinov2_small.json",
     "base": "dinov2_base.json",
     "large": "dinov2_large.json",

@@ -494,8 +494,8 @@ class XrayPnoaramicInstance(XrayPnoramic):
                     for v in range(masks.shape[0]):
                         cv2.imwrite(f'outputs/results/mask_{v}.png', masks[v])
             else:
-                masks = np.zeros([0, *src_rsz.shape[:2]], dtype=np.bool_)
-                
+                masks = np.zeros([bboxes.shape[0], *src_rsz.shape[:2]], dtype=np.bool_)
+
 
             area = masks.reshape(masks.shape[0], -1).sum(axis=1) if masks.size > 0 else np.zeros([0])
         else:

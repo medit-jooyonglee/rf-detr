@@ -363,6 +363,12 @@ def draw_preditions_boxes(new_samples, outputs):
     pred_label = np.squeeze(np.argmax(logits, axis=-1))
     label = fdi = label_to_fdi(pred_label)
     
+    pred_masks = outputs.get('pred_masks')
+    if pred_masks is not None:
+        pred_masks = F.interpolate(pred_masks, size=inputs_arrays.shape[-2:], mode='bilinear', align_corners=False)
+        pred_masks_label = torch_utils.to_numpy(pred_masks > 0)
+    else:
+        pred_masks_label = None
     
     boxes = np.squeeze(boxes)
     # boxes = boxes[label > 0]
@@ -381,6 +387,7 @@ def draw_preditions_boxes(new_samples, outputs):
         return np.concatenate([x0, y0, x1, y1], axis=1)
     
     colors = vtk_utils.get_teeth_color_table(normalize=False)
+    colors[0, :] = 0
     # colors = np.array([[0, 255, 0], [255, 0, 0], [0, 0, 255], [255, 255, 0], [0, 255, 255], [255, 0, 255], [128, 128, 128], [128, 0, 0], [0, 128, 0]])
     # num_classes = 10
     for i in range(num_batch):
@@ -393,6 +400,16 @@ def draw_preditions_boxes(new_samples, outputs):
         posit_labels = label[i][posit]
         boxes_xy = denorm_boxes_to_xyxy(posit_boxes, width, height)
         draw_bboxes(image, boxes_xy, colors=colors[posit_labels])
+        if pred_masks_label is not None:
+            posit_masks = pred_masks_label[i][posit]
+            label_image = posit_labels[:, None, None] * posit_masks
+            label_image = np.max(label_image, axis=0)
+            restore_label_image = cv2.resize(label_image, (width, height), interpolation=cv2.INTER_NEAREST)
+            color_label_image = colors[restore_label_image]
+            # image_utils.
+            image = utils_numpy.apply_blending_mask(image, color_label_image)
+            
+
         os.makedirs('results', exist_ok=True)
         
         cv2.imwrite(f'results/bounding_draw_{time_strftime()}.png', image.astype(np.uint8)[..., ::-1])
