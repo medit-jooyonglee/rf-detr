@@ -351,19 +351,24 @@ def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=N
     return stats, coco_evaluator
 
 
-def draw_preditions_boxes(new_samples, outputs):
+def draw_preditions_boxes(new_samples, outputs, save=False, save_dir='results'):
     from trainer import torch_utils
     from rfdetr.datasets.teeth import draw_bboxes
     from trainer import utils_numpy, image_utils, time_strftime, vtk_utils
     from rfdetr.datasets.xraypanoramic import label_to_fdi
     import cv2
-    inputs_arrays  = torch_utils.to_numpy(new_samples.tensors)
+    from rfdetr.util import box_ops
+    
+    if hasattr(new_samples, 'tensors'):
+        inputs_arrays  = torch_utils.to_numpy(new_samples.tensors)
+    elif isinstance(new_samples, torch.Tensor):
+        inputs_arrays  = torch_utils.to_numpy(new_samples)
     boxes = torch_utils.to_numpy(outputs['pred_boxes'])
     probs = outputs['pred_logits'].sigmoid()
     probs = torch_utils.to_numpy(probs.to(torch.float32))
     # logits = torch_utils.to_numpy(outputs['pred_logits'].to(torch.float32))
     pred_scores = np.max(probs, axis=-1)
-    pred_label = np.squeeze(np.argmax(probs, axis=-1))
+    pred_label = np.argmax(probs, axis=-1)
     label = fdi = label_to_fdi(pred_label)
     sort_pred_args = np.argsort(pred_scores, axis=-1)[:, ::-1]
     # top_k = 40
@@ -376,7 +381,7 @@ def draw_preditions_boxes(new_samples, outputs):
     else:
         pred_masks_label = None
     
-    boxes = np.squeeze(boxes)
+    # boxes = np.squeeze(boxes)
     # boxes = boxes[label > 0]
     num_batch = inputs_arrays.shape[0]
     # np.squeeze(np.argmax(logtis, axis=-1))
@@ -410,14 +415,13 @@ def draw_preditions_boxes(new_samples, outputs):
     # colors = np.array([[0, 255, 0], [255, 0, 0], [0, 0, 255], [255, 255, 0], [0, 255, 255], [255, 0, 255], [128, 128, 128], [128, 0, 0], [0, 128, 0]])
     # num_classes = 10
     threshold = 0.5
+    res_images = []
     for i in range(num_batch):
         
         image = image_utils.to_magnitude_images(images[i])
         
         # posit = np.logical_and(label[i] > 0, label[i] < num_classes)
         posit = pred_scores[i] > threshold
-        # posit = sort_pred_args[i][:top_k]
-        
         
         print("posit sum: ", np.sum(posit), '/', probs[i].shape[0])
         
@@ -426,7 +430,7 @@ def draw_preditions_boxes(new_samples, outputs):
         posit_labels = label[i][posit]
         boxes_xy = denorm_boxes_to_xyxy(posit_boxes, width, height)
         
-        from rfdetr.util import box_ops
+        
         
         # t_boxes_xy = torch_utils.data_convert(boxes_xy)
         # iou, _ = box_ops.box_iou(t_boxes_xy, t_boxes_xy)
@@ -439,9 +443,12 @@ def draw_preditions_boxes(new_samples, outputs):
             color_label_image = colors[restore_label_image]
             # image_utils.
             image = utils_numpy.apply_blending_mask(image, color_label_image)
-            
+        res_images.append(image)
 
-        os.makedirs('results', exist_ok=True)
-        
-        cv2.imwrite(f'results/bounding_draw_{time_strftime()}.png', image.astype(np.uint8)[..., ::-1])
+        if save:
+            os.makedirs(save_dir, exist_ok=True)
+            save_name = f'{save_dir}/bounding_draw_{time_strftime()}.png'        
+            cv2.imwrite(save_name, image.astype(np.uint8)[..., ::-1])
+            print("Saved image with bounding boxes to: ", save_name)
+    return res_images
         

@@ -38,18 +38,7 @@ from rfdetr.config import (
 from rfdetr.engine import draw_preditions_boxes
 
 def main():
-    # print("git:\n  {}\n".format(utils.get_sha()))
-    # print(args)
-    # # convert device to device_id
-    # if args.device == 'cuda':
-    #     device_id = "0"
-    # elif args.device == 'cpu':
-    #     device_id = ""
-    # else:
-    #     device_id = str(int(args.device))
-    
-    # from rfdetr.main import populate_args
-    #     args.device = f"cuda:{device_id}"
+
     rf_detr = RFDETRSmall(
         
         patch_size=16,
@@ -73,7 +62,6 @@ def main():
     )
     
     model = rf_detr.model.model
-    # rf_detr = RFDETRSmall(
     
     def get_target_image_size(image_shape, rererence_width:int = 640):
         ih, iw = image_shape[:2]
@@ -111,8 +99,8 @@ def main():
     for file in found:
         img = cv2.imread(file, cv2.IMREAD_GRAYSCALE)
         rsz_img = resize_image(img, stride=64)
-        img2 = np.repeat(rsz_img[None], 3, axis=0)
-        
+        img2 = np.repeat(rsz_img[None], 3, axis=0) / 255.
+
         img_tensor = torch_utils.data_convert(img2[None])
         
         with torch.no_grad():
