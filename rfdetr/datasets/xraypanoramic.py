@@ -265,13 +265,23 @@ class XrayPnoaramicInstance(XrayPnoramic):
                  split=None,
                  stride=64,
                  num_classes=3,
+                 splits=None,
+                 bg_crop_prob=0.15,
                  **kwargs):
-        
-        
-        XrayPnoramic.__init__(self, 
+
+        default_splits = {
+            'train': (0, 0.85),
+            'val': (0.85, 0.9),
+            'valid': (0.85, 0.9),
+            'test': (0.9, 1.0),
+        }
+        XrayPnoramic.__init__(self,
+                              name=name,
+                              splits=splits if splits is not None else default_splits,
                               path_lists=[img_folder],
-                              
+
                               **kwargs)
+        self.bg_crop_prob = bg_crop_prob if name == 'train' else 0.0
         logger = get_logger()
         if num_classes in [2, 32]:
             logger.info(f'in case of RF-DETR. 0, background class is not included in num_classes {num_classes}. It will be added automatically.')
@@ -295,10 +305,42 @@ class XrayPnoaramicInstance(XrayPnoramic):
         #     np.arange(11, 19)[::-1],
         self.mapping = np.arange(256, dtype=np.int64)
         # self.mapping[:] = 33
-        self.mapping[0] = 0 
+        self.mapping[0] = 0
         # self.mapping[fdi_sort] = np.arange(1, 33)
-        
-        
+
+    @staticmethod
+    def _no_overlap(crop_box, bboxes_xyxy):
+        """True if crop_box (x0,y0,x1,y1) has zero intersection with every box in bboxes_xyxy."""
+        if bboxes_xyxy.shape[0] == 0:
+            return True
+        cx0, cy0, cx1, cy1 = crop_box
+        ix0 = np.maximum(cx0, bboxes_xyxy[:, 0])
+        iy0 = np.maximum(cy0, bboxes_xyxy[:, 1])
+        ix1 = np.minimum(cx1, bboxes_xyxy[:, 2])
+        iy1 = np.minimum(cy1, bboxes_xyxy[:, 3])
+        inter_w = np.clip(ix1 - ix0, 0, None)
+        inter_h = np.clip(iy1 - iy0, 0, None)
+        return bool(np.all(inter_w * inter_h == 0))
+
+    def _sample_background_crop(self, src, bboxes_xyxy, scale_range=(0.2, 0.5), max_tries=10):
+        """Reject-sample a real sub-region of `src` that overlaps none of `bboxes_xyxy`.
+
+        Returns the cropped image (a genuine background-only patch, not synthetic
+        content) or None if no valid region was found within `max_tries`.
+        """
+        h, w = src.shape[:2]
+        for _ in range(max_tries):
+            crop_h = int(np.random.uniform(*scale_range) * h)
+            crop_w = int(np.random.uniform(*scale_range) * w)
+            if crop_h < 8 or crop_w < 8:
+                continue
+            y0 = np.random.randint(0, h - crop_h + 1)
+            x0 = np.random.randint(0, w - crop_w + 1)
+            crop_box = np.array([x0, y0, x0 + crop_w, y0 + crop_h], dtype=np.float32)
+            if self._no_overlap(crop_box, bboxes_xyxy):
+                return src[y0:y0 + crop_h, x0:x0 + crop_w]
+        return None
+
     def processing_target_offset(self, target):
         # target
         
@@ -408,20 +450,33 @@ class XrayPnoaramicInstance(XrayPnoramic):
 
                 
         annot_data = extract_annotation_info(mask_file)
-        
+
         keys = ['class_title', 'class_id', 'bbox', 'segmentation']
         # seg_polygos = [np.array([obj[key] for key in keys], dtype=object) for obj in annot_data]
         # *w, h, w, h format
-        bboxes = np.array([obj['bbox'] for obj in annot_data], dtype=np.float32)
+        bboxes = np.array([obj['bbox'] for obj in annot_data], dtype=np.float32).reshape(-1, 4)
         # ()
         class_labels = np.array([int(obj['class_title']) for obj in annot_data], dtype=np.int64)
-        
+
         class_labels = label_mapping(class_labels, self.num_classes)
-                
-        
-        
-        
+
+
+
+
         src = cv2_imread(img_file, flags=cv2.IMREAD_GRAYSCALE)
+
+        # Train-time only: occasionally replace this sample with a real
+        # background-only crop (zero overlap with any GT box) so the model
+        # gets genuine "no object" supervision instead of only ever seeing
+        # images that contain teeth. This is real image content, not
+        # synthetic boxes, so it doesn't corrupt the label distribution.
+        if self.bg_crop_prob > 0 and bboxes.shape[0] > 0 and np.random.uniform() < self.bg_crop_prob:
+            bg_crop = self._sample_background_crop(src, bboxes)
+            if bg_crop is not None:
+                src = bg_crop
+                bboxes = np.zeros((0, 4), dtype=np.float32)
+                class_labels = np.zeros((0,), dtype=np.int64)
+                annot_data = []
         # target = cv2_imread(mask_file, flags=-1)
         # target = target[..., 0] if target.ndim == 3 else target # instance id만 남기기 (0: 배경)
         # 
@@ -459,15 +514,11 @@ class XrayPnoaramicInstance(XrayPnoramic):
             cv2.imwrite(f'outputs/results/{time_strftime()}.png', drawing[..., ::-1])
         
         
-        if bboxes.size == 0:
-            # num_negat = np.random.uniform()
-            num_negat = 10
-            ctr = np.random.uniform(0, src.shape[::2][::-1], [num_negat, 2])
-            wh = np.random.uniform([10, 30], [20, 50], [num_negat, 2])
-            vmin = ctr - wh / 2
-            vmax = ctr + wh / 2
-            bboxes = np.concatenate([vmin, vmax], axis=1)
-            class_labels = np.zeros([num_negat], dtype=np.int64)
+        # Note: bboxes/class_labels may legitimately be empty here (no teeth
+        # annotated, or a background crop was substituted above). The
+        # Hungarian matcher and set-based criterion handle zero-target
+        # images natively (every query is assigned to "no object"), so we
+        # intentionally do NOT fabricate boxes for the empty case.
 
         # shape = input_img.shape[:2]
         # box_shape = np.array([w, h, w, h])
@@ -946,6 +997,7 @@ def build(image_set, args, resolution):
         name=image_set,
         include_masks=args.segmentation_head,
         num_classes=getattr(args, 'num_classes', 2),
+        bg_crop_prob=getattr(args, 'bg_crop_prob', 0.15),
         # **args_dict
     )
     return dataset

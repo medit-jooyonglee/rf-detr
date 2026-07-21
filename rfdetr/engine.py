@@ -359,9 +359,15 @@ def draw_preditions_boxes(new_samples, outputs):
     import cv2
     inputs_arrays  = torch_utils.to_numpy(new_samples.tensors)
     boxes = torch_utils.to_numpy(outputs['pred_boxes'])
-    logits = torch_utils.to_numpy(outputs['pred_logits'].to(torch.float32))
-    pred_label = np.squeeze(np.argmax(logits, axis=-1))
+    probs = outputs['pred_logits'].sigmoid()
+    probs = torch_utils.to_numpy(probs.to(torch.float32))
+    # logits = torch_utils.to_numpy(outputs['pred_logits'].to(torch.float32))
+    pred_scores = np.max(probs, axis=-1)
+    pred_label = np.squeeze(np.argmax(probs, axis=-1))
     label = fdi = label_to_fdi(pred_label)
+    sort_pred_args = np.argsort(pred_scores, axis=-1)[:, ::-1]
+    # top_k = 40
+
     
     pred_masks = outputs.get('pred_masks')
     if pred_masks is not None:
@@ -386,19 +392,44 @@ def draw_preditions_boxes(new_samples, outputs):
         y1 = (y_c + 0.5 * h) * img_h
         return np.concatenate([x0, y0, x1, y1], axis=1)
     
+    
+    # 32 num_classes
+    
     colors = vtk_utils.get_teeth_color_table(normalize=False)
+    
     colors[0, :] = 0
+    
+    # debug_num_clolrs = 4
+    debug_4num_clolrs = False
+    if debug_4num_clolrs:
+        # for debugging 10 / 20 / 30 40
+        colors[10:20, :] = np.array([255, 0, 0])
+        colors[20:30, :] = np.array([0, 255, 0])
+        colors[30:40, :] = np.array([0, 0, 255])
+        colors[40:50, :] = np.array([255, 255, 0])
     # colors = np.array([[0, 255, 0], [255, 0, 0], [0, 0, 255], [255, 255, 0], [0, 255, 255], [255, 0, 255], [128, 128, 128], [128, 0, 0], [0, 128, 0]])
     # num_classes = 10
+    threshold = 0.5
     for i in range(num_batch):
         
         image = image_utils.to_magnitude_images(images[i])
         
         # posit = np.logical_and(label[i] > 0, label[i] < num_classes)
-        posit = label[i] > 0
+        posit = pred_scores[i] > threshold
+        # posit = sort_pred_args[i][:top_k]
+        
+        
+        print("posit sum: ", np.sum(posit), '/', probs[i].shape[0])
+        
+        
         posit_boxes = boxes[i][posit]
         posit_labels = label[i][posit]
         boxes_xy = denorm_boxes_to_xyxy(posit_boxes, width, height)
+        
+        from rfdetr.util import box_ops
+        
+        # t_boxes_xy = torch_utils.data_convert(boxes_xy)
+        # iou, _ = box_ops.box_iou(t_boxes_xy, t_boxes_xy)
         draw_bboxes(image, boxes_xy, colors=colors[posit_labels])
         if pred_masks_label is not None:
             posit_masks = pred_masks_label[i][posit]

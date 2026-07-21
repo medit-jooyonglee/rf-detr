@@ -50,7 +50,7 @@ def train_from_coco_dir(coco_dir: str):
     
     rf_detr.train(
         dataset_dir=coco_dir,
-        epochs=100,
+        epochs=300,
         device="cuda" if device_supports_cuda else "cpu",
         dataset_file='coco',
         coco_path=coco_dir,
@@ -107,13 +107,32 @@ def get_my_arg_parse():
     parser.add_argument("--annot_file", type=str, required=False, default='../../xray_coco_33_seg.json')
     # parser.add_argument("--annot_file", type=str, required=False, default='../../xray_coco_33_seg.json')
     parser.add_argument('--eval', action='store_true', help='Run evaluation after training')
-    parser.add_argument('--eval_save', action='store_true', help='Run save results after training')
+    parser.add_argument('--eval_save', action='store_true',
+                        # default=True,
+                        help='Run save results after training')
     parser.add_argument('--segmentation_head', action='store_true',
                         # default=True, 
                         help='Run save results after training')
     
+    parser.add_argument('--pretrain_weights', type=str,
+                        # default=True, 
+                        default='',
+                        help='Run save results after training')
+    
+    # parser.add_argument('--pretrain_weights', type=str,
+    #                     # default=True, 
+    #                     default='',
+    #                 help='Run save results after training')
     args = parser.parse_args()
     return args
+
+
+# cli/main.py -> rfdetr/main.py -> rfdetr/enggine.py::train_one_epocch // evaluate
+# rfdetr/models/lwdetr // models & build-model
+# rfdetr/detr.py ;; rfdetr main-class model & export utils
+# rfdetr/main.py 
+#   / trainer // train & evaluate & test trainer 
+#  mODEL: trainer wrapper class
 
 
 def train_from_xray_teeth_dir():
@@ -122,35 +141,57 @@ def train_from_xray_teeth_dir():
     dataset_dir = args.coco_dir
     num_classes = args.num_classes
     annot_file = args.annot_file
-    segmentation_head = args.segmentation_head
     
+    
+    args.segmentation_head = True
+    args.eval = True
+    args.eval_save = True
+    
+    # rf_detr = RFDETRSmall(
+        
+    #     patch_size=16,
+    #     num_windows=4,
+    #     num_queries=50,
+    #     group_detr=5,
+    #     num_select=30,
+    #     encoder='dinov2_windowed_tiny',
+
+    #     num_classes=32)
     
     # rf_detr = RFDETRNano(
     rf_detr = RFDETRSmall(
         
         patch_size=16,
         num_windows=4,
-        num_queries=50,
+        # num_queries=100,
+        num_queries=100,
         group_detr=5,
         num_select=30,
+        encoder='dinov2_windowed_tiny',
+        # encoder='dinov2_windowed_base',
+        
         # patch_size=24,
         # num_channels=1,
         # eval=True,
         # num_classes=32,
         num_classes=num_classes,
-        segmentation_head=segmentation_head,
+        segmentation_head=args.segmentation_head,
         # pretrain_weights="output/checkpoint0099.pth",
         # pretrain_weights="output/xray_teeth/checkpoint0059.pth",
         # pretrain_weights='output/xray_teeth33/checkpoint0039.pth'
         # pretrain_weights='output/xray_teeth33/checkpoint_best_regular.pth'
+        # pretrain_weights='output/xray_teeth33_nano/checkpoint_best_total.pth'
         # pretrain_weights='output/xray_teeth33_small/checkpoint_best_regular.pth'
+        # pretrain_weights= args.pretrain_weights # 'output/xray_teeth33_small_seg/checkpoint0039.pth',
+        # pretrain_weights='output/xray_teeth33_dinov2tiny_small/checkpoint0039.pth',
+        pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
         
     )
     device_supports_cuda = torch.cuda.is_available()
     
     rf_detr.train(
         dataset_dir=dataset_dir,
-        epochs=200,
+        epochs=500,
         device="cuda" if device_supports_cuda else "cpu",
         dataset_file='xray_teeth',
         # coco_path=teeth_dir,
@@ -166,14 +207,16 @@ def train_from_xray_teeth_dir():
         multi_scale=False,
         num_queries=50,
         num_select=35,
-        output_dir='output/xray_teeth33_small_seg',
+        checkpoint_interval = 50,
+        output_dir='output/xray_teeth33_dinov2tiny_small_seg',
         # annot_file='../../xray_coco_33.json',
         # annot_file='../../xray_coco_33.json',
         annot_file=annot_file,
+        # resume='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth',
         # annot_file=''
         # annot_file='../../xray_coco.json',
         # pretrain_weights="output/checkpoint0099.pth",
-        segmentation_head=segmentation_head,
+        segmentation_head=args.segmentation_head,
         eval_save=args.eval_save,
         eval=args.eval,
         # **args.__dict__
@@ -215,6 +258,7 @@ def trainer():
     train_from_rf_project(project, args.dataset_version)
 
 # cli/main.py -> rfdetr/main.py -> rfdetr/enggine.py::train_one_epocch // evaluate
+# model-build model-config - >rfdetr/models/lwdetr.py // build_model(...)
 if __name__ == "__main__":
     # trainer()
     
