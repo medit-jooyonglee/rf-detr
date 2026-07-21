@@ -121,7 +121,7 @@ class XrayPnoramic(Dataset):
         logger = get_logger()
     
             
-        img_files = glob.glob(os.path.join(path, 'Radiographs/*.jpg'))
+        img_files = glob.glob(os.path.join(path, 'Radiographs/*.*'))
         # mask_files = glob.glob(os.path.join(path, 'masks_machine/*.png'))
         annot_files = glob.glob(os.path.join(path, 'ann/*.json'))
         if len(img_files) > 0 and len(img_files) > 0:
@@ -1074,7 +1074,7 @@ def boxes_to_xyxy(boxes, size):
 
 
 def build(image_set, args, resolution):
-    img_folder = str(args.dataset_dir)
+    img_folder = args.dataset_dir
     # annotation file is builed by functoin . see teeth.py::test_build_teethdsata
     annot_file = getattr(args, 'annot_file', '../../xray_coco.json')
     if os.path.exists(annot_file):
@@ -1096,6 +1096,8 @@ def build(image_set, args, resolution):
         bg_crop_prob=getattr(args, 'bg_crop_prob', 0.15),
         # **args_dict
     )
+    
+    print(f'=====================Loaded dataset {image_set} with {len(dataset)} =====================')
     return dataset
 
 

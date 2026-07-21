@@ -137,15 +137,24 @@ def get_my_arg_parse():
 
 def train_from_xray_teeth_dir():
     
+    dataset_dir = [
+        # '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2/',
+        # '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/',
+        '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/'
+        
+    ]
+    
+    annot_file = '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_coco_33_seg.json'
     args = get_my_arg_parse()
-    dataset_dir = args.coco_dir
+    
+    # dataset_dir = args.coco_dir
     num_classes = args.num_classes
-    annot_file = args.annot_file
+    # annot_file = args.annot_file
     
     
     args.segmentation_head = True
-    args.eval = True
-    args.eval_save = True
+    # args.eval = True
+    # args.eval_save = True
     
     # rf_detr = RFDETRSmall(
         
@@ -191,7 +200,7 @@ def train_from_xray_teeth_dir():
     
     rf_detr.train(
         dataset_dir=dataset_dir,
-        epochs=500,
+        epochs=800,
         device="cuda" if device_supports_cuda else "cpu",
         dataset_file='xray_teeth',
         # coco_path=teeth_dir,
@@ -267,7 +276,7 @@ if __name__ == "__main__":
     # coco_dir = '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle/Teeth Segmentation JSON/d2/'
     # 'E:\dataset\reverse_tomosynthesis\kaggle_xrays\xray_teeth_seg_kaggle\Teeth Segmentation JSON\d2'
     # coco_dir = '/data1/jooyonglee/teeth_segmentation3d/render_set/teeth_seg_3d/'
-    torch.cuda.set_device(torch.device('cuda:4'))
+    torch.cuda.set_device(torch.device('cuda:5'))
     # train_from_teeth_dir(coco_dir)
     train_from_xray_teeth_dir()
 

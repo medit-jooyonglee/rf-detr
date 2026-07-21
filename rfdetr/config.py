@@ -6,7 +6,7 @@
 
 
 from pydantic import BaseModel
-from typing import List, Optional, Literal, Type
+from typing import List, Optional, Literal, Type, Union
 import torch
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
@@ -140,7 +140,7 @@ class TrainConfig(BaseModel):
     num_select: int = 300
     dataset_file: Literal["coco", "o365", "roboflow", "teeth", "xray_teeth"] = "roboflow"
     square_resize_div_64: bool = True
-    dataset_dir: str
+    dataset_dir: Union[str, List[str]]
     output_dir: str = "output"
     multi_scale: bool = True
     expanded_scales: bool = True

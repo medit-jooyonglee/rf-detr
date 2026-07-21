@@ -283,7 +283,7 @@ def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=N
             outputs = model(samples)
             
             if getattr(args, 'eval_save', False):
-                draw_preditions_boxes(samples, outputs)
+                draw_preditions_boxes(samples, outputs, save=True)
 
         if args.fp16_eval:
             for key in outputs.keys():
