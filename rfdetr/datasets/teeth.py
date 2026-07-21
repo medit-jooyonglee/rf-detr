@@ -262,7 +262,13 @@ def draw_bboxes(image, bboxes, colors=None, thickness=1):
     bboxes = np.asarray(bboxes)
     bboxes = bboxes.reshape([-1, 4])
     for i, box in enumerate(bboxes):
-        color = (0, 255, 0) if colors is None else colors[i]
+        if colors is not None:
+            if len(colors) > i:
+                color = colors[i]
+            elif isinstance(colors, (list, tuple)) and len(colors) == 3:
+                color = colors
+        else:
+            color = (0, 255, 0) # if colors is None else colors[i]
         color = tuple(map(int, color))
         p0, p1 =box[:2], box[2:]
         # p0 = np.round(p0).astype(np.int32)

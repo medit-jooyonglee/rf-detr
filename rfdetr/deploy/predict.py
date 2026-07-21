@@ -38,6 +38,7 @@ from rfdetr.config import (
 from rfdetr.engine import draw_preditions_boxes
 
 def main():
+    from trainer import diskmanager, image_utils
 
     rf_detr = RFDETRSmall(
         
@@ -94,10 +95,17 @@ def main():
     model.eval()
         # "data/xray_teeth33/test/images/000000.png",]
     from trainer import torch_utils
-    path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle/Teeth Segmentation JSON/d2/img/'
-    found = glob.glob(f'{path}/*.jpg')
-    for file in found:
-        img = cv2.imread(file, cv2.IMREAD_GRAYSCALE)
+    # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle/Teeth Segmentation JSON/d2/img/'
+    path = 'E:/dataset/reverse_tomosynthesis/cbct_ios_dcm'
+    
+    found = diskmanager.deep_search_files(path, exts=['.jpg', '.png', '.jpeg'])
+    # found = glob.glob(f'{path}/*.jpg')
+    i_break = 30
+    for idx, file in enumerate(found):
+        if idx > i_break:
+            break
+        # img = cv2.imread(file, cv2.IMREAD_GRAYSCALE)
+        img = image_utils.cv2_imread(file, flags=cv2.IMREAD_GRAYSCALE)
         rsz_img = resize_image(img, stride=64)
         img2 = np.repeat(rsz_img[None], 3, axis=0) / 255.
 
@@ -110,10 +118,13 @@ def main():
             if 'pred_masks' in outputs:
                 print(outputs['pred_masks'].shape)
         
-        
-            draw_preditions_boxes(
-                img_tensor, outputs
-            )
+            try:
+                draw_preditions_boxes(
+                    img_tensor, outputs, save=True
+                )
+            except Exception as e:
+                print(e)
+                print('draw_preditions_boxes failed')
     # model = build_model(args)
     # checkpoint = torch.load(args.pretrain_weights, map_location='cpu', weights_only=False)
     # res = model.load_state_dict(checkpoint['model'], strict=False)

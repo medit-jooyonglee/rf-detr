@@ -87,8 +87,65 @@ class XrayPnoramic(Dataset):
         # mapping_ar = np.zeros(k.max() + 1, dtype=v.dtype)
         # mapping_ar[k] = v
         return color_table
-                
+    
+    
+    def search_kaggle_data01(self, path, meta_file):
+        logger = get_logger()
         
+        mapping = self.read_meta_kaggle_mapping(meta_file)
+        self.meta_kaggle_mapping = mapping
+        
+        
+        img_files = glob.glob(os.path.join(path, 'img/*.jpg'))
+        # mask_files = glob.glob(os.path.join(path, 'masks_machine/*.png'))
+        annot_files = glob.glob(os.path.join(path, 'ann/*.json'))
+        # mask_files = glob.glob(os.path.join(path, 'masks_machine/*.png'))
+        img_files = sorted(img_files)
+        mask_files = sorted(annot_files)
+        if len(img_files) == len(annot_files):
+            pass
+        else:
+            logger.warning(f'number of image files and mask files do not match in path: {path}')
+            src_fname = [os.path.splitext(os.path.basename(name))[0] for name in img_files]
+            mask_fname = [os.path.splitext(os.path.basename(name))[0] for name in mask_files]
+            commons, args_a, args_b = np.intersect1d(src_fname, mask_fname, return_indices=True)
+            img_files = [img_files[i] for i in args_a]
+            mask_files = [mask_files[i] for i in args_b]
+        start, end = self.splits
+        start, end = int(len(img_files) * start), int(len(img_files) * end)
+        return img_files[start:end], mask_files[start:end]
+    
+    
+    def search_kaggle_data02(self, path):
+        # pass
+        logger = get_logger()
+    
+            
+        img_files = glob.glob(os.path.join(path, 'Radiographs/*.jpg'))
+        # mask_files = glob.glob(os.path.join(path, 'masks_machine/*.png'))
+        annot_files = glob.glob(os.path.join(path, 'ann/*.json'))
+        if len(img_files) > 0 and len(img_files) > 0:
+            # pass
+        # if len(img_files) == len(annot_files):
+            # pass
+            # else:
+            logger.warning(f'number of image files and mask files do not match in path: {path}')
+            # src_fname = [os.path.splitext(os.path.basename(name))[0] for name in img_files]
+            src_fname = [os.path.basename(name).lower() for name in img_files]
+            annot_fname = [os.path.splitext(os.path.basename(name))[0].lower() for name in annot_files]
+            commons, args_a, args_b = np.intersect1d(src_fname, annot_fname, return_indices=True)
+            img_files = [img_files[i] for i in args_a]
+            annot_files = [annot_files[i] for i in args_b]
+            start, end = self.splits
+            start, end = int(len(img_files) * start), int(len(img_files) * end)
+            return img_files[start:end], annot_files[start:end]
+        else:
+            return [], []
+        
+        # mask_files = glob.glob(os.path.join(path, 'masks_machine/*.png'))
+        
+        
+    
     def deep_search_files(self, path_lists):
         logger = get_logger()
         
@@ -101,31 +158,35 @@ class XrayPnoramic(Dataset):
                 # with open(meta_file, "r") as f:
                     # meta_data = json.load(f)
                     
-                mapping = self.read_meta_kaggle_mapping(meta_file)
-                self.meta_kaggle_mapping = mapping
+                # mapping = self.read_meta_kaggle_mapping(meta_file)
+                # self.meta_kaggle_mapping = mapping
                 
                 
-                img_files = glob.glob(os.path.join(path, 'img/*.jpg'))
-                # mask_files = glob.glob(os.path.join(path, 'masks_machine/*.png'))
-                annot_files = glob.glob(os.path.join(path, 'ann/*.json'))
-                # mask_files = glob.glob(os.path.join(path, 'masks_machine/*.png'))
-                img_files = sorted(img_files)
-                mask_files = sorted(annot_files)
-                if len(img_files) == len(annot_files):
-                    pass
-                else:
-                    logger.warning(f'number of image files and mask files do not match in path: {path}')
-                    src_fname = [os.path.splitext(os.path.basename(name))[0] for name in img_files]
-                    mask_fname = [os.path.splitext(os.path.basename(name))[0] for name in mask_files]
-                    commons, args_a, args_b = np.intersect1d(src_fname, mask_fname, return_indices=True)
-                    img_files = [img_files[i] for i in args_a]
-                    mask_files = [mask_files[i] for i in args_b]
-                start, end = self.splits
-                start, end = int(len(img_files) * start), int(len(img_files) * end)
-                
-                self.source_files.extend(img_files[start:end])
+                # img_files = glob.glob(os.path.join(path, 'img/*.jpg'))
+                # # mask_files = glob.glob(os.path.join(path, 'masks_machine/*.png'))
+                # annot_files = glob.glob(os.path.join(path, 'ann/*.json'))
+                # # mask_files = glob.glob(os.path.join(path, 'masks_machine/*.png'))
+                # img_files = sorted(img_files)
+                # mask_files = sorted(annot_files)
+                # if len(img_files) == len(annot_files):
+                #     pass
+                # else:
+                #     logger.warning(f'number of image files and mask files do not match in path: {path}')
+                #     src_fname = [os.path.splitext(os.path.basename(name))[0] for name in img_files]
+                #     mask_fname = [os.path.splitext(os.path.basename(name))[0] for name in mask_files]
+                #     commons, args_a, args_b = np.intersect1d(src_fname, mask_fname, return_indices=True)
+                #     img_files = [img_files[i] for i in args_a]
+                #     mask_files = [mask_files[i] for i in args_b]
+                # start, end = self.splits
+                # start, end = int(len(img_files) * start), int(len(img_files) * end)
+                img_files, mask_files = self.search_kaggle_data01(path, meta_file)
+                # self.source_files.extend(img_files)
+                # self.gt_files.extend(mask_files)
+            else:
+                img_files, mask_files = self.search_kaggle_data02(path)
+            self.source_files.extend(img_files)
+            self.gt_files.extend(mask_files)
             
-                self.gt_files.extend(mask_files[start:end])
                 
         
     def get_target_image_size(self, image_shape):
@@ -253,9 +314,6 @@ def label_mapping(labels, num_classes:int):
 class XrayPnoaramicInstance(XrayPnoramic):
     def __init__(self, 
                  
-                #  stride=1,
-                #  include_masks=False,
-                 
                  img_folder,
                  annot_file='',
                  transforms=None,
@@ -275,10 +333,11 @@ class XrayPnoaramicInstance(XrayPnoramic):
             'valid': (0.85, 0.9),
             'test': (0.9, 1.0),
         }
+        path_lists = [img_folder] if isinstance(img_folder, str) else img_folder
         XrayPnoramic.__init__(self,
                               name=name,
                               splits=splits if splits is not None else default_splits,
-                              path_lists=[img_folder],
+                              path_lists=path_lists,
 
                               **kwargs)
         self.bg_crop_prob = bg_crop_prob if name == 'train' else 0.0
@@ -295,8 +354,8 @@ class XrayPnoaramicInstance(XrayPnoramic):
                 #  path_lists=[],
                 #  target_mode: Literal['edge'] = 'edge',
                  
-        if os.path.exists(annot_file):
-            CocoDetection.__init__(img_folder, annot_file, None, False)
+        # if os.path.exists(annot_file):
+        #     CocoDetection.__init__(img_folder, annot_file, None, False)
         # params = {
         self.stride = stride
         self.include_masks = include_masks 
@@ -450,20 +509,33 @@ class XrayPnoaramicInstance(XrayPnoramic):
 
                 
         annot_data = extract_annotation_info(mask_file)
-
+        src = cv2_imread(img_file, flags=cv2.IMREAD_GRAYSCALE)
         keys = ['class_title', 'class_id', 'bbox', 'segmentation']
         # seg_polygos = [np.array([obj[key] for key in keys], dtype=object) for obj in annot_data]
         # *w, h, w, h format
         bboxes = np.array([obj['bbox'] for obj in annot_data], dtype=np.float32).reshape(-1, 4)
         # ()
         class_labels = np.array([int(obj['class_title']) for obj in annot_data], dtype=np.int64)
-
+        if bboxes.size == 0 and class_labels.size == 0:
+            shape = np.array(src.shape[:2][::-1])
+            num_gen = 3
+            bmin = np.random.uniform(0, 0.8, size=(num_gen, 2))
+            min_size = np.array([1/25, 1/6])
+            
+            size = np.random.uniform(min_size, min_size * 1.5, size=(num_gen, 2))
+            bmax = bmin + size
+            bboxes = np.concatenate([bmin * shape, bmax* shape], axis=-1).astype(np.int64)
+            class_labels = np.zeros([  num_gen], dtype=np.int64)
+            # pass
+            # class_labels = np.zeros((0,), dtype=np.int64)
+            
         class_labels = label_mapping(class_labels, self.num_classes)
 
+        
 
 
 
-        src = cv2_imread(img_file, flags=cv2.IMREAD_GRAYSCALE)
+        
 
         # Train-time only: occasionally replace this sample with a real
         # background-only crop (zero overlap with any GT box) so the model
@@ -844,25 +916,33 @@ def main_xraypanoramic_instance():
 def test_build_coco_json():
     
         
-    img_folder = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2'
+    # img_folder = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2'
+    base_dir = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays'
     # ann_file = ''
     # dataset = XrayPnoaramicInstance(img_folder, '', None, True)
     
     num_classes = 33
     include_masks = True
     dataset = XrayPnoaramicInstance(
-        img_folder=
-            'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2'
+        img_folder= [
+            'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2',
+            'E:/dataset/reverse_tomosynthesis/kaggle_xrays/kaggle_2222',
+            
+        ]
         ,
         num_classes=num_classes,
         # stride=4,
         include_masks=include_masks,
+        name='train',
+        splits={
+            'train': (0, 1)
+        }
     )
     assert len(dataset) > 0
     
     # num_classes = 3
     
-    res = dataset.coco_json_export(base_dir=img_folder)
+    res = dataset.coco_json_export(base_dir=base_dir)
     
     # print(res)
     filename = f'xray_coco_{num_classes}.json'
@@ -880,7 +960,13 @@ def test_load_coco_dataset():
     logger = get_logger()
     # img_folder = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2'
     # img_folder = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2'
-    path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle'
+    # path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle'
+    kaggle_path2 = [
+        'E:/dataset/reverse_tomosynthesis/kaggle_xrays/kaggle_2222',
+        'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2'
+    ]
+    
+    
     # ann_file = ''
     # dataset = XrayPnoaramicInstanceCoco(img_folder, '', None, True)
     # path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle'
@@ -889,19 +975,29 @@ def test_load_coco_dataset():
     dataset = XrayPnoaramicInstanceCoco(
         
             # 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2'
-            os.path.join(path, 'Teeth Segmentation JSON/d2')
-        ,
-        os.path.join(path, 'xray_coco.json'),
+            # os.path.join(path, 'Teeth Segmentation JSON/d2')
+            kaggle_path2,
+        # ,
+        # os.path.join(path, 'xray_coco.json'),
         None,
-        include_masks=True
+        None,
+        include_masks=True,
+        num_classes=32,
+        splits={
+            'train': (0, 1)
+        }
+        
+        
     )
+    
+    print(f'found dataset {len(dataset)}')
     assert len(dataset) > 0
     shape_stats = {
         'inputs': set(),
         'targets': set()
     }
-    for _ in tqdm.tqdm(range(len(dataset))):
-        img, target = dataset[_]
+    for i in tqdm.tqdm(range(len(dataset))):
+        img, target = dataset[82]
         print(torch_utils.get_shape([img, target]))
 
         img, target = torch_utils.to_numpy([img, target])
@@ -913,7 +1009,7 @@ def test_load_coco_dataset():
         target_bboxes = target['boxes']
         
         if target_bboxes.size == 0:
-            logger.error(f"No bounding boxes found for index {_} in dataset.")
+            logger.error(f"No bounding boxes found for index {i} in dataset.")
         
         segmentation = target.get('masks')
         if segmentation is not None:
@@ -1008,5 +1104,5 @@ def build(image_set, args, resolution):
 if __name__ == '__main__':
     # main_xraypanoramic_instance()
     # test_build_coco_json()
-    
-    test_load_coco_dataset()
+    test_build_coco_json()
+    # test_load_coco_dataset()
