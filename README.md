@@ -252,3 +252,20 @@ We welcome and appreciate all contributions! If you notice any issues or bugs, h
       </a>
   </div>
 </div>
+
+
+--------------
+
+
+xray 데이터셋
+
+두개 데이터 타입 지원
+
+한개는 
+* Teeth Segmentation JSON/d2 폴더 구성의 데이터셋 : "./ann" json  annottation 데이터가 포함되어 있음
+
+다른 하나는
+* segmetation info. json파일이 큰 용량으로 지원되고, 상기 "./ann" 형식으로 변환해서 사용한다.(dataloader.py)
+  rfdetr/util/dataloader.py
+
+  
