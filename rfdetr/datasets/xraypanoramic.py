@@ -652,7 +652,7 @@ class XrayPnoaramicInstance(XrayPnoramic):
         orig_shape = np.array(src.shape[:2])
         shape = np.array(src_rsz.shape[:2])
         annot = dict(
-            boxes=bboxes,
+            boxes=bboxes.astype(np.float32),
             labels=class_labels,
             image_id=np.array([index]),
             area=area,
@@ -667,7 +667,7 @@ class XrayPnoaramicInstance(XrayPnoramic):
             
         # src_rsz_permute = np.transpose(src_rsz, [2, 0, 1]).copy()
         # on color
-        src_rsz = (src_rsz / 255)[None]
+        src_rsz = (src_rsz / 255)[None].astype(np.float32)
         # if return_raw_annotation:
         return src_rsz, annot
         # else:
@@ -792,6 +792,30 @@ class XrayPnoaramicInstanceCoco(CocoDetection):
                             #  include_masks=False,
         )
         
+        self.index_coco_id = []
+            
+        # image id mapping    
+        if len(self.coco.imgs) > 0:
+            # assumption image id
+            meta = [self.coco.loadImgs(i)[0] for i in range(len(self.coco.imgs))]
+            img_id_mapping = {v['file_name'].replace('\\', '/').lower(): v['id'] for v in meta}
+            image_files = list(img_id_mapping.keys())
+            
+            source_clean = [name.strip().replace('\\', '/').lower() for name in self.base_datset.source_files]
+            
+            matched_idx = []
+            for abs_path in source_clean:
+                for idx, relat in enumerate(image_files):
+                    if abs_path.endswith(relat):
+                        matched_idx.append(idx)
+                        break
+                    
+            assert len(matched_idx) == len(source_clean), 'some images are not matched'
+            self.index_coco_id = matched_idx
+
+            
+                          
+        
     def __len__(self):
         return len(self.base_datset)
         # return 10
@@ -801,8 +825,12 @@ class XrayPnoaramicInstanceCoco(CocoDetection):
         # img, target = torch_utils.data_convert(item, device='cpu')
         img, target = item
         target.pop('segmentation', None)        
+        if self.index_coco_id:
+            target.update({'image_id': np.array(self.index_coco_id[index])})
+        
         img, target = torch_utils.data_convert(item, device='cpu')
         if self._transforms is not None:
+            
             img, target = self._transforms(img, target)
         img = np.repeat(img, 3, axis=0) if img.ndim == 3 and img.shape[0] == 1 else img
         # if self._transforms is not None:
@@ -963,29 +991,35 @@ def test_load_coco_dataset():
     # path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle'
     kaggle_path2 = [
         'E:/dataset/reverse_tomosynthesis/kaggle_xrays/kaggle_2222',
-        'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2'
+        'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2',
+        '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2/',
+        '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/',
     ]
     
-    
+    # ann_file = ''
     # ann_file = ''
     # dataset = XrayPnoaramicInstanceCoco(img_folder, '', None, True)
     # path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle'
     # xray_coco.json'
+    
+    annot_file = '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_coco_33_seg.json'
     
     dataset = XrayPnoaramicInstanceCoco(
         
             # 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2'
             # os.path.join(path, 'Teeth Segmentation JSON/d2')
             kaggle_path2,
+            annot_file,
         # ,
         # os.path.join(path, 'xray_coco.json'),
-        None,
+        # None,
         None,
         include_masks=True,
         num_classes=32,
-        splits={
-            'train': (0, 1)
-        }
+        name='valid',
+        # splits={
+            # 'train': (0, 0.)
+        # }
         
         
     )
@@ -997,7 +1031,7 @@ def test_load_coco_dataset():
         'targets': set()
     }
     for i in tqdm.tqdm(range(len(dataset))):
-        img, target = dataset[82]
+        img, target = dataset[i]
         print(torch_utils.get_shape([img, target]))
 
         img, target = torch_utils.to_numpy([img, target])
@@ -1106,5 +1140,5 @@ def build(image_set, args, resolution):
 if __name__ == '__main__':
     # main_xraypanoramic_instance()
     # test_build_coco_json()
-    test_build_coco_json()
-    # test_load_coco_dataset()
+    # test_build_coco_json()
+    test_load_coco_dataset()

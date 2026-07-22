@@ -138,9 +138,9 @@ def get_my_arg_parse():
 def train_from_xray_teeth_dir():
     
     dataset_dir = [
-        # '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2/',
-        # '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/',
-        '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/'
+        '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2/',
+        '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/',
+        # '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/'
         
     ]
     
@@ -193,7 +193,11 @@ def train_from_xray_teeth_dir():
         # pretrain_weights='output/xray_teeth33_small/checkpoint_best_regular.pth'
         # pretrain_weights= args.pretrain_weights # 'output/xray_teeth33_small_seg/checkpoint0039.pth',
         # pretrain_weights='output/xray_teeth33_dinov2tiny_small/checkpoint0039.pth',
-        pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
+        # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
+        # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0199.pth',
+        pretrain_weights= 'output/xray_teeth33_dinov2tiny_small_seg/checkpoint0299.pth'
+        
+        # 'output/xray_teeth33_dinov2tiny_small_seg/checkpoint0299.pth'
         
     )
     device_supports_cuda = torch.cuda.is_available()
