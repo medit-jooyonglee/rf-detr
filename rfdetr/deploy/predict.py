@@ -58,7 +58,8 @@ def main():
         num_classes=32,
         segmentation_head=True,
 
-        pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
+        # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
+        pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0099.pth'
         
     )
     
@@ -102,8 +103,8 @@ def main():
     # found = glob.glob(f'{path}/*.jpg')
     i_break = 30
     for idx, file in enumerate(found):
-        if idx > i_break:
-            break
+        # if idx > i_break:
+            # break
         # img = cv2.imread(file, cv2.IMREAD_GRAYSCALE)
         img = image_utils.cv2_imread(file, flags=cv2.IMREAD_GRAYSCALE)
         rsz_img = resize_image(img, stride=64)
@@ -120,7 +121,7 @@ def main():
         
             try:
                 draw_preditions_boxes(
-                    img_tensor, outputs, save=True
+                    img_tensor, outputs, save=True, save_dir=f'results/test/',
                 )
             except Exception as e:
                 print(e)

@@ -17,7 +17,7 @@ from trainer.image_utils import cv2_imread, cv2_imwrite
 from rfdetr.datasets.coco import CocoDetection
 
 
-# E:\temp\miccai_ct\img
+# E:/temp/miccai_ct\img
 
 """https://www.kaggle.com/datasets/humansintheloop/teeth-segmentation-on-dental-x-ray-imagessummary_
 """
@@ -311,6 +311,41 @@ def label_mapping(labels, num_classes:int):
         # return label2fdi[labels]
 
 
+def create_albu_transform(max_rotate_degree=8, **params):
+    import albumentations as A
+    from rfdetr.datasets.aug_albumentations import RandomCropWithRoundedBorder, MaskawareImageAug
+    
+    return A.Compose([
+        A.SomeOf(
+            transforms=[
+                MaskawareImageAug(
+                    target_size=(512, 512),
+                    crop_scale=(0.6, 0.8),
+                    corner_radius=30,
+                    border_thickness=4,
+                    border_brightness_inc=100,
+                    p=0.5,
+                ),
+                A.CoarseDropout(
+                    num_holes_range=(4, 8),          # 지울 패치 개수 범위 (튜플 형태)
+                    hole_height_range=(0.02, 0.05),  # 이미지 높이의 2% ~ 5 크기로 설정 (비율)
+                    hole_width_range=(0.02, 0.05),      # 패치 최소 너비
+                # fill_value=0,         # 채울 색상 (0: 검은색, 127: 회색 등 또는 'random')
+                fill=200,        # 실행할 때마다 구멍마다 랜덤 색상이 알아서 채워짐
+                p=0.5
+            ),
+                # A.HorizontalFlip(p=0.5),
+                A.RandomBrightnessContrast(p=0.2),
+                A.Rotate(limit=max_rotate_degree, p=0.5),
+            ],
+            n=3,  # 1개 또는 2개 선택
+            p=1.0
+        )
+        ], 
+        bbox_params=A.BboxParams(format='pascal_voc'),
+        keypoint_params=A.KeypointParams(format='xy', )
+    )
+    
 class XrayPnoaramicInstance(XrayPnoramic):
     def __init__(self, 
                  
@@ -365,6 +400,8 @@ class XrayPnoaramicInstance(XrayPnoramic):
         self.mapping = np.arange(256, dtype=np.int64)
         # self.mapping[:] = 33
         self.mapping[0] = 0
+        
+        self.albu_transform = create_albu_transform()
         # self.mapping[fdi_sort] = np.arange(1, 33)
 
     @staticmethod
@@ -542,22 +579,61 @@ class XrayPnoaramicInstance(XrayPnoramic):
         # gets genuine "no object" supervision instead of only ever seeing
         # images that contain teeth. This is real image content, not
         # synthetic boxes, so it doesn't corrupt the label distribution.
-        if self.bg_crop_prob > 0 and bboxes.shape[0] > 0 and np.random.uniform() < self.bg_crop_prob:
-            bg_crop = self._sample_background_crop(src, bboxes)
-            if bg_crop is not None:
-                src = bg_crop
-                bboxes = np.zeros((0, 4), dtype=np.float32)
-                class_labels = np.zeros((0,), dtype=np.int64)
-                annot_data = []
+        # if self.bg_crop_prob > 0 and bboxes.shape[0] > 0 and np.random.uniform() < self.bg_crop_prob:
+            # bg_crop = self._sample_background_crop(src, bboxes)
+            # if bg_crop is not None:
+            #     src = bg_crop
+            #     bboxes = np.zeros((0, 4), dtype=np.float32)
+            #     class_labels = np.zeros((0,), dtype=np.int64)
+            #     annot_data = []
         # target = cv2_imread(mask_file, flags=-1)
         # target = target[..., 0] if target.ndim == 3 else target # instance id만 남기기 (0: 배경)
         # 
         target_img_size = self.get_target_image_size(src.shape[:2])
         cv_size = tuple(target_img_size[::-1])
         src_rsz = cv2.resize(src, cv_size, interpolation=cv2.INTER_LINEAR)
+        src_rsz = np.repeat(src_rsz[..., None], 3, axis=-1) if src_rsz.ndim == 2 else src_rsz
         scale_wh = np.array(cv_size) / np.array(src.shape[::-1])
         
+        rsz_bboxes = (bboxes.reshape([-1, 2]) * scale_wh).reshape(bboxes.shape)
+        # rsz_polygons = 
+        if self.include_masks:
+            polygons = [annot['segmentation'] for annot in annot_data]
+            rsz_polygons = [np.array(poly).reshape([-1, 2]) * scale_wh for poly in polygons]
+            if rsz_polygons:
+                rsz_polygons = np.concatenate(rsz_polygons, axis=0)
+            else:
+                rsz_polygons = np.zeros((0, 2), dtype=np.float32)
+            polygons_indices = [len(poly) for poly in polygons]
+            # rsz_polygons = np.concatenate([poly.reshape(-1, 2) for poly in rsz_polygons], axis=0) if len(rsz_polygons) > 0 else np.zeros((0, 2), dtype=np.float32)
+        else:
+            rsz_polygons = None
+            polygons_indices = None
         
+        # rsz_bboxes_labels = np.concatenate([rsz_bboxes, np.zeros([rsz_bboxes.shape[0], 1])], axis=-1)
+        if self.name == 'train':
+            transformed = self.albu_transform(
+                image=src_rsz, 
+                bboxes=rsz_bboxes, 
+                # class_labels=class_labels,
+                keypoints=rsz_polygons,
+                polygons_indices=polygons_indices,
+            )
+            
+            src_rsz = transformed['image']
+            rsz_bboxes = transformed['bboxes']
+            trans_rsz_polygons = transformed['keypoints']
+        else:
+            trans_rsz_polygons = rsz_polygons
+            
+        rsz_polygons = []
+        start = 0
+        for size in polygons_indices:
+            rsz_polygons.append(trans_rsz_polygons[start:start+size])
+            start += size
+        
+            
+            
 
         debug = False
         if debug:
@@ -596,20 +672,20 @@ class XrayPnoaramicInstance(XrayPnoramic):
         # box_shape = np.array([w, h, w, h])
         polygon_segmentation = []
         if self.include_masks:
+
             
-            polygons = [annot['segmentation'] for annot in annot_data]
             # for 
-            if polygons:
+            if rsz_polygons is not None and len(rsz_polygons) > 0:
                 # masks = np.zeros([bboxes.shape[0], *src_rsz.shape[:2]], dtype=np.uint8)
                 masks = np.zeros([bboxes.shape[0], *src_rsz.shape[:2]], dtype=np.uint8)
                 
 
-                for i, poly in enumerate(polygons):
+                for i, poly in enumerate(rsz_polygons):
                     
                     polygon_segmentation.append(
                         np.array(poly).ravel().tolist()
                     )
-                    draw_segmentation(masks[i], poly, color=(255, 255, 255), scale=scale_wh)
+                    draw_segmentation(masks[i], poly, color=(255, 255, 255), scale=None)
                     # print(i, np.sum(res > 0))
                 
                 masks = masks.astype(np.bool_)
@@ -627,9 +703,10 @@ class XrayPnoaramicInstance(XrayPnoramic):
             
             
         if norm_bbox:
-            norm_scale = scale_wh / np.array(cv_size)
+            # norm_scale = scale_wh / np.array(cv_size)
+            norm_scale = 1 / np.array(cv_size)
             # box_shape = np.array(mapping_target.shape)
-            bboxes = (bboxes.reshape([-1, 2]) * norm_scale).reshape(bboxes.shape)
+            bboxes = (rsz_bboxes.reshape([-1, 2]) * norm_scale).reshape(rsz_bboxes.shape)
 
         # if bboxes.size == 0:
 
@@ -667,7 +744,8 @@ class XrayPnoaramicInstance(XrayPnoramic):
             
         # src_rsz_permute = np.transpose(src_rsz, [2, 0, 1]).copy()
         # on color
-        src_rsz = (src_rsz / 255)[None].astype(np.float32)
+        # src_rsz = (src_rsz / 255)[None].astype(np.float32)
+        src_rsz = np.transpose(src_rsz, [2, 0, 1]).copy().astype(np.float32) / 255.0
         # if return_raw_annotation:
         return src_rsz, annot
         # else:
@@ -1002,7 +1080,8 @@ def test_load_coco_dataset():
     # path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle'
     # xray_coco.json'
     
-    annot_file = '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_coco_33_seg.json'
+    # annot_file = '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_coco_33_seg.json'
+    annot_file = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/xray_coco_33_seg.json'
     
     dataset = XrayPnoaramicInstanceCoco(
         
@@ -1016,7 +1095,7 @@ def test_load_coco_dataset():
         None,
         include_masks=True,
         num_classes=32,
-        name='valid',
+        name='train',
         # splits={
             # 'train': (0, 0.)
         # }
@@ -1030,9 +1109,12 @@ def test_load_coco_dataset():
         'inputs': set(),
         'targets': set()
     }
+    test_iter = 20
     for i in tqdm.tqdm(range(len(dataset))):
         img, target = dataset[i]
         print(torch_utils.get_shape([img, target]))
+        if i >= test_iter:
+            break
 
         img, target = torch_utils.to_numpy([img, target])
         
@@ -1061,12 +1143,23 @@ def test_load_coco_dataset():
         
         from trainer import vtk_utils
         colors_fdis = vtk_utils.get_teeth_color_table(normalize=False)
+        colors_fdis[0, :] = 0
         target_colors = colors_fdis[target_fdi]
+        # target_colors[:, 0] = 0
+        # label = fdi = label_to_fdi(pred_label)
+        gt_visual = False
+        if gt_visual:
+            draw_bboxes(drawing, denorm_bboxes_i, target_colors, xy_format='xy')
+            masks = target.get('masks')
+            if masks is not None:
+                target_fdi_mask = target_fdi[:, None, None] * masks
+                target_fdi_color_image = colors_fdis[target_fdi_mask]
+                target_fdi_color_image = np.max(target_fdi_color_image, axis=0)
+                # cv2.imwrite('temp.png', target_fdi_color_image.astype(np.uint8))
+                
+                drawing = utils_numpy.apply_blending_mask(drawing, target_fdi_color_image, alpha=0.5)
+        cv2.imwrite(f'outputs/result/xray_{i}.png', drawing[..., ::-1])
         
-        # draw_bboxes(drawing, denorm_bboxes_i, target_colors, xy_format='xy')
-        # cv2.imwrite(f'outputs/result/xray_{_}.png', drawing[..., ::-1])
-        # for box in denorm_bboxes_i:
-        #     cv2.rectangle
         
     print(f"Input shapes: {shape_stats['inputs']}")
     print(f"Target shapes: {shape_stats['targets']}")
