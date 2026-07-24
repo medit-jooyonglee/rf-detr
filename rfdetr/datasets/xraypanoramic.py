@@ -16,6 +16,19 @@ from trainer.image_utils import cv2_imread, cv2_imwrite
 # from reversereg.preproc.sampler import cv2_imread, cv2_imwrite, to_rgba, blend_images
 from rfdetr.datasets.coco import CocoDetection
 
+# image resolutsion
+# \xray_teeth_seg_kaggle\Teeth Segmentation JSON\d2\img
+# (2041, 1024) / (1852, 1024)
+
+# (1615, 850)
+
+# dr. baek
+# (2640, 1256)
+
+#  periapical / 치근단
+# (645, 515) (66, 614)
+
+
 
 # E:/temp/miccai_ct\img
 
