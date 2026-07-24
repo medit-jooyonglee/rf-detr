@@ -196,13 +196,18 @@ def init_and_get_model(config=None):
 def export_libtorch(output_path='e:/temp/model_libtorch.pt', shape=(384, 704)):
     model = init_and_get_model({})
     model.eval()
+    model.requires_grad_(False)
+    # dtype = torch.float16
+    dtype = torch.float16
+    # model.half()
+    model.to(dtype)
     # model
     # model.export()  # swap in forward_export + baked position embeddings (required before tracing)
 
-    dummy = torch.randn(1, 3, *shape).cuda() #.cuda()
+    dummy = torch.randn(1, 3, *shape).cuda().half() #.cuda()
     # model(dummy)  # run once to ensure any lazy modules are initialized
-    # with torch.no_grad():
-    traced = torch.jit.trace(model, dummy)
+    with torch.no_grad():
+        traced = torch.jit.trace(model, dummy)
 
     traced.save(output_path)
     print(f'saved libtorch model to {output_path}')
@@ -210,11 +215,15 @@ def export_libtorch(output_path='e:/temp/model_libtorch.pt', shape=(384, 704)):
     
 def inference_model_main():
     from rfdetr.datasets.xraypanoramic import get_size
-    libtorch = 'outputs/temp.pt'
+    # libtorch = 'outputs/temp.pt'
+    libtorch = 'outputs/temp16.pt'
     
     model = torch.jit.load(libtorch)
     model.cuda()
     model.eval()
+    # model.requires_grad_(False)
+    
+    dtype = torch.float16
     
     path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/Radiographs/'
     from trainer import diskmanager, image_utils, torch_utils
@@ -225,7 +234,7 @@ def inference_model_main():
         size = get_size(img.shape[:2], refenrece_width=640, stride=64)
         rsz_img = cv2.resize(img, tuple(size[::-1]), interpolation=cv2.INTER_LINEAR)
         rsz_img = np.repeat(rsz_img[None], 3, axis=0).astype(np.float32) / 255.
-        tensor = torch_utils.data_convert(rsz_img[None])
+        tensor = torch_utils.data_convert(rsz_img[None], dtype=dtype)
         with torch.no_grad():
             res = model(tensor)
         res = [torch.unsqueeze(v, 0) for v in res]
