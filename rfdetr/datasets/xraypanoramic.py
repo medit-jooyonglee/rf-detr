@@ -373,6 +373,7 @@ class XrayPnoaramicInstance(XrayPnoramic):
                  num_classes=3,
                  splits=None,
                  bg_crop_prob=0.15,
+                 augment_en=True,
                  **kwargs):
 
         default_splits = {
@@ -381,6 +382,7 @@ class XrayPnoaramicInstance(XrayPnoramic):
             'valid': (0.85, 0.9),
             'test': (0.9, 1.0),
         }
+        self.augment_en = augment_en
         path_lists = [img_folder] if isinstance(img_folder, str) else img_folder
         XrayPnoramic.__init__(self,
                               name=name,
@@ -624,7 +626,7 @@ class XrayPnoaramicInstance(XrayPnoramic):
             polygons_indices = None
         
         # rsz_bboxes_labels = np.concatenate([rsz_bboxes, np.zeros([rsz_bboxes.shape[0], 1])], axis=-1)
-        if self.name == 'train':
+        if self.name == 'train' and self.augment_en:
             transformed = self.albu_transform(
                 image=src_rsz, 
                 bboxes=rsz_bboxes, 
@@ -1093,8 +1095,8 @@ def test_load_coco_dataset():
     # path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle'
     # xray_coco.json'
     
-    # annot_file = '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_coco_33_seg.json'
-    annot_file = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/xray_coco_33_seg.json'
+    annot_file = '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_coco_33_seg.json'
+    # annot_file = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/xray_coco_33_seg.json'
     
     dataset = XrayPnoaramicInstanceCoco(
         
@@ -1122,10 +1124,10 @@ def test_load_coco_dataset():
         'inputs': set(),
         'targets': set()
     }
-    test_iter = 20
+    test_iter = 100
     for i in tqdm.tqdm(range(len(dataset))):
         img, target = dataset[i]
-        print(torch_utils.get_shape([img, target]))
+        # print(torch_utils.get_shape([img, target]))
         if i >= test_iter:
             break
 
@@ -1160,7 +1162,7 @@ def test_load_coco_dataset():
         target_colors = colors_fdis[target_fdi]
         # target_colors[:, 0] = 0
         # label = fdi = label_to_fdi(pred_label)
-        gt_visual = False
+        gt_visual = True
         if gt_visual:
             draw_bboxes(drawing, denorm_bboxes_i, target_colors, xy_format='xy')
             masks = target.get('masks')
@@ -1171,11 +1173,14 @@ def test_load_coco_dataset():
                 # cv2.imwrite('temp.png', target_fdi_color_image.astype(np.uint8))
                 
                 drawing = utils_numpy.apply_blending_mask(drawing, target_fdi_color_image, alpha=0.5)
-        cv2.imwrite(f'outputs/result/xray_{i}.png', drawing[..., ::-1])
+            
+        save_dir = 'outputs/result'
+        os.makedirs(save_dir, exist_ok=True)
+        cv2.imwrite(f'{save_dir}/xray_{i}.png', drawing[..., ::-1])
         
-        
-    print(f"Input shapes: {shape_stats['inputs']}")
-    print(f"Target shapes: {shape_stats['targets']}")
+            
+        # print(f"Input shapes: {shape_stats['inputs']}")
+        # print(f"Target shapes: {shape_stats['targets']}")
     
 def draw_bboxes(image, bboxes, colors=None, xy_format='yx'):
     bboxes = np.asarray(bboxes)
@@ -1234,6 +1239,7 @@ def build(image_set, args, resolution):
         include_masks=args.segmentation_head,
         num_classes=getattr(args, 'num_classes', 2),
         bg_crop_prob=getattr(args, 'bg_crop_prob', 0.15),
+        augment_en=False,
         # **args_dict
     )
     

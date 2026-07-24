@@ -350,14 +350,82 @@ def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=N
             stats["coco_eval_masks"] = coco_evaluator.coco_eval["segm"].stats.tolist()
     return stats, coco_evaluator
 
+def non_max_suppression(boxes, scores, threshold):
+    """
+    NumPy를 이용한 NMS (Non-Maximum Suppression) 구현
+    
+    Parameters:
+    - boxes: (N, 4) 형태의 바운딩 박스 배열 ([xmin, ymin, xmax, ymax])
+    - scores: (N,) 형태의 각 박스별 신뢰도 점수
+    - threshold: IoU 임계값 (이 값보다 크면 겹치는 박스로 판단하여 제거)
+    
+    Returns:
+    - keep: NMS를 통과한 살아남은 박스들의 인덱스 배열
+    """
+    if len(boxes) == 0:
+        return np.array([], dtype=int)
 
-def draw_preditions_boxes(new_samples, outputs, save=False, save_dir='results'):
+    # 좌표 추출
+    x1 = boxes[:, 0]
+    y1 = boxes[:, 1]
+    x2 = boxes[:, 2]
+    y2 = boxes[:, 3]
+
+    # 각 박스의 넓이 계산
+    areas = (x2 - x1) * (y2 - y1)
+    
+    # 점수가 높은 순서대로 정렬 (내림차순)
+    order = scores.argsort()[::-1]
+
+    keep = []
+    while order.size > 0:
+        # 가장 점수가 높은 박스의 인덱스 선택
+        i = order[0]
+        keep.append(i)
+
+        if order.size == 1:
+            break
+
+        # 남은 박스들과 선택된 박스 간의 교차 영역(Intersection) 좌표 계산
+        xx1 = np.maximum(x1[i], x1[order[1:]])
+        yy1 = np.maximum(y1[i], y1[order[1:]])
+        xx2 = np.minimum(x2[i], x2[order[1:]])
+        yy2 = np.minimum(y2[i], y2[order[1:]])
+
+        # 교차 영역의 너비와 높이 계산 (음수일 경우 0으로 처리)
+        w = np.maximum(0.0, xx2 - xx1)
+        h = np.maximum(0.0, yy2 - yy1)
+        inter = w * h
+
+        # IoU (Intersection over Union) 계산
+        # IoU = 교차 영역 / (박스 i의 넓이 + 남은 박스들의 넓이 - 교차 영역)
+        iou = inter / (areas[i] + areas[order[1:]] - inter)
+
+        # IoU가 임계값(threshold)보다 작은 박스들만 남김
+        inds = np.where(iou <= threshold)[0]
+        
+        # order 배열 업데이트 (다음 반복을 위해)
+        order = order[inds + 1]
+
+    return np.array(keep, dtype=int)
+
+
+def draw_preditions_boxes(new_samples, outputs, save=False, save_dir='results', nms_refinement=True):
     from trainer import torch_utils
     from rfdetr.datasets.teeth import draw_bboxes
     from trainer import utils_numpy, image_utils, time_strftime, vtk_utils
     from rfdetr.datasets.xraypanoramic import label_to_fdi
     import cv2
     from rfdetr.util import box_ops
+    def denorm_boxes_to_xyxy(boxes, img_w, img_h):
+        shape = boxes.shape
+        x_c, y_c, w, h = np.split(boxes.reshape([-1, 4]), 4, axis=1)
+        x0 = (x_c - 0.5 * w) * img_w
+        y0 = (y_c - 0.5 * h) * img_h
+        x1 = (x_c + 0.5 * w) * img_w
+        y1 = (y_c + 0.5 * h) * img_h
+        return np.concatenate([x0, y0, x1, y1], axis=1).reshape(shape)
+    
     
     if hasattr(new_samples, 'tensors'):
         inputs_arrays  = torch_utils.to_numpy(new_samples.tensors)
@@ -366,13 +434,14 @@ def draw_preditions_boxes(new_samples, outputs, save=False, save_dir='results'):
     boxes = torch_utils.to_numpy(outputs['pred_boxes'])
     probs = outputs['pred_logits'].sigmoid()
     probs = torch_utils.to_numpy(probs.to(torch.float32))
+    
+    width, height = inputs_arrays.shape[-2:][::-1]
+    # posit = pred_scores[i] > threshold
+    # (batch, num_queries, 4) 
+    boxes = denorm_boxes_to_xyxy(boxes, width, height)
     # logits = torch_utils.to_numpy(outputs['pred_logits'].to(torch.float32))
     pred_scores = np.max(probs, axis=-1)
     pred_label = np.argmax(probs, axis=-1)
-    label = fdi = label_to_fdi(pred_label)
-    sort_pred_args = np.argsort(pred_scores, axis=-1)[:, ::-1]
-    # top_k = 40
-
     
     pred_masks = outputs.get('pred_masks')
     if pred_masks is not None:
@@ -380,23 +449,56 @@ def draw_preditions_boxes(new_samples, outputs, save=False, save_dir='results'):
         pred_masks_label = torch_utils.to_numpy(pred_masks > 0)
     else:
         pred_masks_label = None
+    confidence_threshold = 0.5
+    if nms_refinement:
+        nms_bboxes = []
+        nms_labels = []
+        nms_scores = []
+        nms_masks_labels = []
+        
+        for ib in range(boxes.shape[0]):
+            posit = pred_scores[ib] > confidence_threshold
+            # print(posit.sum())
+        
+            keep_indices = non_max_suppression(boxes[ib][posit], pred_scores[ib][posit], threshold=0.6)
+            
+            posit_inds = np.where(posit)[0]
+            keep_indices = posit_inds[keep_indices]
+            print(f'batch {ib}: nms {posit.sum()}--->{len(keep_indices)}')
+            # nms_bboxes
+            nms_bboxes.append(boxes[ib][keep_indices])
+            nms_labels.append(pred_label[ib][keep_indices])
+            nms_scores.append(pred_scores[ib][keep_indices])
+            if pred_masks_label is not None:
+                nms_masks_labels.append(pred_masks_label[ib][keep_indices])
+                
+        pred_label = nms_labels
+        pred_scores = nms_scores
+        boxes = nms_bboxes
+        pred_masks_label = nms_masks_labels
+        # pred_label = np.con
+
+    if isinstance(pred_label, list):
+        label = []
+        fdi = []
+        for pl in pred_label:
+            lb = fd = label_to_fdi(pl)
+            label.append(lb)
+            fdi.append(fd)
+    else:
+
+        label = fdi = label_to_fdi(pred_label)
+    # sort_pred_args = np.argsort(pred_scores, axis=-1)[:, ::-1]
     
-    # boxes = np.squeeze(boxes)
+    
     # boxes = boxes[label > 0]
     num_batch = inputs_arrays.shape[0]
     # np.squeeze(np.argmax(logtis, axis=-1))
-    width, height = inputs_arrays.shape[-2:][::-1]
+    
     images = np.transpose(inputs_arrays, [0, 2, 3, 1])
     
     os.makedirs('results', exist_ok=True)
-    def denorm_boxes_to_xyxy(boxes, img_w, img_h):
-        x_c, y_c, w, h = np.split(boxes, 4, axis=1)
-        x0 = (x_c - 0.5 * w) * img_w
-        y0 = (y_c - 0.5 * h) * img_h
-        x1 = (x_c + 0.5 * w) * img_w
-        y1 = (y_c + 0.5 * h) * img_h
-        return np.concatenate([x0, y0, x1, y1], axis=1)
-    
+
     
     # 32 num_classes
     
@@ -421,22 +523,23 @@ def draw_preditions_boxes(new_samples, outputs, save=False, save_dir='results'):
         image = image_utils.to_magnitude_images(images[i])
         
         # posit = np.logical_and(label[i] > 0, label[i] < num_classes)
-        posit = pred_scores[i] > threshold
+        # posit = pred_scores[i] > threshold
         
-        print("posit sum: ", np.sum(posit), '/', probs[i].shape[0])
+        # print("posit sum: ", np.sum(posit), '/', probs[i].shape[0])
         
         
-        posit_boxes = boxes[i][posit]
-        posit_labels = label[i][posit]
-        boxes_xy = denorm_boxes_to_xyxy(posit_boxes, width, height)
+        posit_boxes = boxes[i]
+        posit_labels = label[i]
+        boxes_xy = posit_boxes
+        # boxes_xy = 
         
         
         
         # t_boxes_xy = torch_utils.data_convert(boxes_xy)
         # iou, _ = box_ops.box_iou(t_boxes_xy, t_boxes_xy)
         draw_bboxes(image, boxes_xy, colors=colors[posit_labels])
-        if pred_masks_label is not None:
-            posit_masks = pred_masks_label[i][posit]
+        if pred_masks_label is not None and len(pred_masks_label) > 0:
+            posit_masks = pred_masks_label[i]
             label_image = posit_labels[:, None, None] * posit_masks
             label_image = np.max(label_image, axis=0)
             restore_label_image = cv2.resize(label_image, (width, height), interpolation=cv2.INTER_NEAREST)
