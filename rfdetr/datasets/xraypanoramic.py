@@ -945,7 +945,13 @@ def get_target_image_size(image_shape, rererence_width:int = 640):
     return (ih, rererence_width)
         
 
+def get_size(image_shape, refenrece_width:int=640, stride:int=64):
 
+    size =  get_target_image_size(image_shape, refenrece_width)
+    if stride > 1:
+        # assert stride in [2, 4, 8], 'only stride 2 or 4 is supported'
+        size = (size[0] // stride + 1) * stride, (size[1] // stride  + 1 )* stride
+    return size
 
         
 

@@ -138,7 +138,9 @@ def init_and_get_model(config=None):
             segmentation_head=True,
 
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
-            pretrain_weights='e:/temp/checkpoint.pth'
+            # pretrain_weights='e:/temp/checkpoint.pth'
+            
+            pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint.pth'
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
             
         )
@@ -160,7 +162,16 @@ def init_and_get_model(config=None):
                 bboxes, probs, masks = [torch.squeeze(v) for v in (bboxes, probs, masks)]
                 label = probs.argmax(dim=-1)
                 posit = label > 0
-                return bboxes[posit], probs[posit], label[posit], masks[posit].to(torch.float32)
+                res = bboxes[posit], probs[posit],  masks[posit].to(torch.float32), label[posit]
+                # keys = [
+                #     'pred_boxes',
+                #     'pred_logits',
+                #     'pred_masks',
+                #     'pred_labels'
+                # ]
+                return res
+                # return dict(zip(keys, res))
+                
 
             
         rf_detr.model.model.export()
@@ -182,13 +193,13 @@ def init_and_get_model(config=None):
     
     
     # model.to()
-def export_libtorch(output_path='e:/temp/model_libtorch.pt', shape=(512, 512)):
+def export_libtorch(output_path='e:/temp/model_libtorch.pt', shape=(384, 704)):
     model = init_and_get_model({})
     model.eval()
-    model
+    # model
     # model.export()  # swap in forward_export + baked position embeddings (required before tracing)
 
-    dummy = torch.randn(1, 3, *shape) #.cuda()
+    dummy = torch.randn(1, 3, *shape).cuda() #.cuda()
     # model(dummy)  # run once to ensure any lazy modules are initialized
     # with torch.no_grad():
     traced = torch.jit.trace(model, dummy)
@@ -196,8 +207,48 @@ def export_libtorch(output_path='e:/temp/model_libtorch.pt', shape=(512, 512)):
     traced.save(output_path)
     print(f'saved libtorch model to {output_path}')
     
+    
+def inference_model_main():
+    from rfdetr.datasets.xraypanoramic import get_size
+    libtorch = 'outputs/temp.pt'
+    
+    model = torch.jit.load(libtorch)
+    model.cuda()
+    model.eval()
+    
+    path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/Radiographs/'
+    from trainer import diskmanager, image_utils, torch_utils
+    found = diskmanager.deep_search_files(path, exts=['.jpg', '.jpeg', '.JPG'])
+    
+    for file in found:
+        img = cv2.imread(file, cv2.IMREAD_GRAYSCALE)
+        size = get_size(img.shape[:2], refenrece_width=640, stride=64)
+        rsz_img = cv2.resize(img, tuple(size[::-1]), interpolation=cv2.INTER_LINEAR)
+        rsz_img = np.repeat(rsz_img[None], 3, axis=0).astype(np.float32) / 255.
+        tensor = torch_utils.data_convert(rsz_img[None])
+        with torch.no_grad():
+            res = model(tensor)
+        res = [torch.unsqueeze(v, 0) for v in res]
+        output_keys = [
+                    'pred_boxes',
+                    'pred_logits',
+                    'pred_masks',
+                    'pred_labels'
+                ]
+        res_dicts = dict(zip(output_keys, res))
+        draw_preditions_boxes(
+            tensor,
+            res_dicts,
+            save=True,
+            save_dir='outputs/resulst/export'
+        )
+        
+        
+        
+    
 
     
 if __name__ == '__main__':
     # main()
-    export_libtorch()
+    # export_libtorch('outputs/temp.pt')
+    inference_model_main()
