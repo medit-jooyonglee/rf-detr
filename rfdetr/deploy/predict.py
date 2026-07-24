@@ -37,33 +37,14 @@ from rfdetr.config import (
 
 from rfdetr.engine import draw_preditions_boxes
 
+g_rfdetr_model = None
+
 def main():
     from trainer import diskmanager, image_utils
-
-    rf_detr = RFDETRSmall(
-        
-        patch_size=16,
-        num_windows=4,
-        # num_queries=100,
-        num_queries=100,
-        group_detr=5,
-        num_select=30,
-        encoder='dinov2_windowed_tiny',
-        # encoder='dinov2_windowed_base',
-        
-        # patch_size=24,
-        # num_channels=1,
-        # eval=True,
-        # num_classes=32,
-        num_classes=32,
-        segmentation_head=True,
-
-        # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
-        pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0099.pth'
-        
-    )
+# 
+    model = init_and_get_model()
     
-    model = rf_detr.model.model
+    # model = rf_detr.model.model
     
     def get_target_image_size(image_shape, rererence_width:int = 640):
         ih, iw = image_shape[:2]
@@ -92,14 +73,16 @@ def main():
         # ''
         
         # next(rf_detr.model.model.parameters()).device
-    model = rf_detr.model.model
-    model.eval()
+    # model = rf_detr.model.model
+    # model.eval()
+    model = init_and_get_model()
         # "data/xray_teeth33/test/images/000000.png",]
     from trainer import torch_utils
     # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle/Teeth Segmentation JSON/d2/img/'
     path = 'E:/dataset/reverse_tomosynthesis/cbct_ios_dcm'
+    # path = 
     
-    found = diskmanager.deep_search_files(path, exts=['.jpg', '.png', '.jpeg'])
+    found = diskmanager.deep_search_files(path, exts=['.jpg', '.jpeg'])
     # found = glob.glob(f'{path}/*.jpg')
     i_break = 30
     for idx, file in enumerate(found):
@@ -131,4 +114,90 @@ def main():
     # res = model.load_state_dict(checkpoint['model'], strict=False)
     
     print(model)
-main()
+    
+
+def init_and_get_model(config=None):
+    global g_rfdetr_model
+    if g_rfdetr_model is None:
+        rf_detr = RFDETRSmall(
+            
+            patch_size=16,
+            num_windows=4,
+            # num_queries=100,
+            num_queries=100,
+            group_detr=5,
+            num_select=30,
+            encoder='dinov2_windowed_tiny',
+            # encoder='dinov2_windowed_base',
+            
+            # patch_size=24,
+            # num_channels=1,
+            # eval=True,
+            # num_classes=32,
+            num_classes=32,
+            segmentation_head=True,
+
+            # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
+            pretrain_weights='e:/temp/checkpoint.pth'
+            # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
+            
+        )
+        # g_rfdetr_model = rf_detr.model.model
+        # g_rfdetr_model.eval()
+        # g_rfdetr_model.cuda()
+        
+        class ModelWrapper(nn.Module):
+            def __init__(self, model):
+                super().__init__()
+                self.model = model
+            
+            def forward(self, x):
+                assert x.shape[0] == 1, "Only batch size of 1 is supported for this wrapper."
+                res =  self.model(x)
+                # bboxes / logits / masks
+                bboxes, logits, masks = res
+                probs = logits.softmax(dim=-1)
+                bboxes, probs, masks = [torch.squeeze(v) for v in (bboxes, probs, masks)]
+                label = probs.argmax(dim=-1)
+                posit = label > 0
+                return bboxes[posit], probs[posit], label[posit], masks[posit].to(torch.float32)
+
+            
+        rf_detr.model.model.export()
+        model = ModelWrapper(rf_detr.model.model)
+        g_rfdetr_model = model
+        
+            
+                
+    return g_rfdetr_model
+    
+# def export_libtorch():
+#     pass
+#     model = init_and_get_model({})
+#     x0 = torch.randn(1, 3, 64*5, 64*10).cuda()
+#     res = torch.jit.trace(
+#         model,)
+#         # torch.randn(1, 3, 224, 224).cuda()
+    
+    
+    
+    # model.to()
+def export_libtorch(output_path='e:/temp/model_libtorch.pt', shape=(512, 512)):
+    model = init_and_get_model({})
+    model.eval()
+    model
+    # model.export()  # swap in forward_export + baked position embeddings (required before tracing)
+
+    dummy = torch.randn(1, 3, *shape) #.cuda()
+    # model(dummy)  # run once to ensure any lazy modules are initialized
+    # with torch.no_grad():
+    traced = torch.jit.trace(model, dummy)
+
+    traced.save(output_path)
+    print(f'saved libtorch model to {output_path}')
+    
+
+    
+if __name__ == '__main__':
+    # main()
+    export_libtorch()
