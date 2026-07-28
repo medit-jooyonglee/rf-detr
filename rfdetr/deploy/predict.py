@@ -12,7 +12,7 @@ from collections import defaultdict
 
 import onnx
 import torch
-import onnxsim
+# import onnxsim
 import numpy as np
 from PIL import Image
 
@@ -213,6 +213,25 @@ def export_libtorch(output_path='e:/temp/model_libtorch.pt', shape=(384, 704)):
     print(f'saved libtorch model to {output_path}')
     
     
+def coreml_export_main():
+    from trainer import coreml_utils
+    
+    model = init_and_get_model({})
+    model.eval()
+    model.requires_grad_(False)
+    # dtype = torch.float16
+    # dtype = torch.float16
+    # model.half()
+    # model.to(dtype)
+    
+    coreml_model = coreml_utils.export_coreml(
+        model, [(1, 3, 384, 704)],
+        
+    )
+    coreml_model.save('temp.mlpackage')
+    # model
+    
+    
 def inference_model_main():
     from rfdetr.datasets.xraypanoramic import get_size
     # libtorch = 'outputs/temp.pt'
@@ -260,4 +279,5 @@ def inference_model_main():
 if __name__ == '__main__':
     # main()
     # export_libtorch('outputs/temp.pt')
-    inference_model_main()
+    coreml_export_main()
+    # inference_model_main()
