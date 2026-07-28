@@ -243,12 +243,7 @@ def coreml_export_main():
     with torch.no_grad():
         traced = torch.jit.trace(model, (x0))
 
-    # traced.save(output_path)
-    
-                    #     'pred_boxes',
-                #     'pred_logits',
-                #     'pred_masks',
-                #     'pred_labels'
+
                 
     output_names = [
         'pred_boxes', 'pred_logits', 'pred_masks', 'pred_labels'
@@ -259,9 +254,57 @@ def coreml_export_main():
     )
     coreml_model.save('temp.mlpackage')
     
-        
-        # dtype = torch.float16
 
+def test_coreml_inference():
+    x0 = np.random.randn(1, 3, 384, 704)
+    from trainer import coreml_utils, torch_utils, timefn
+    from rfdetr.datasets.xraypanoramic import get_size
+    # coreml_utils.
+    model = coreml_utils.import_coreml('temp.mlpackage')
+    
+    @timefn
+    def coreml_run():
+        res = coreml_utils.coreml_predict(model, (x0,))
+        print(torch_utils.get_shape(res))
+        # dtype = torch.float16
+        
+    path = '/Users/meditai/Desktop/dataset/xray'
+    from trainer import diskmanager, image_utils, torch_utils
+    found = diskmanager.deep_search_files(path, exts=['.jpg', '.jpeg', '.JPG'])
+    
+    for file in found:
+        img = cv2.imread(file, cv2.IMREAD_GRAYSCALE)
+        size = get_size(img.shape[:2], refenrece_width=640, stride=64)
+        rsz_img = cv2.resize(img, tuple(size[::-1]), interpolation=cv2.INTER_LINEAR)
+        rsz_img = np.repeat(rsz_img[None], 3, axis=0).astype(np.float32) / 255.
+        rsz_img = rsz_img[None]
+        res = coreml_utils.coreml_predict(model, (rsz_img,))
+        input_tensor = torch_utils.data_convert(rsz_img)
+        # tensor = torch_utils.data_convert(rsz_img[None], dtype=dtype)
+        # with torch.no_grad():
+            # res = model(tensor)
+        # res = [torch.unsqueeze(v, 0) for v in res]
+        res = [v[None] for v in res]
+        res = torch_utils.data_convert(res, device='cpu')
+        output_keys = [
+                    'pred_boxes',
+                    'pred_logits',
+                    'pred_masks',
+                    'pred_labels'
+                ]
+        res_dicts = dict(zip(output_keys, res))
+        draw_preditions_boxes(
+            # torch_utils.data_convert(rsz_img[None]),
+            input_tensor,
+            res_dicts,
+            save=True,
+            save_dir='outputs/resulst/export'
+        )
+        
+ 
+    # for _ in range(10):
+    #     coreml_run()       
+    '/Users/meditai/Desktop/dataset/xray'
 def inference_model_main():
     from rfdetr.datasets.xraypanoramic import get_size
     # libtorch = 'outputs/temp.pt'
@@ -309,5 +352,6 @@ def inference_model_main():
 if __name__ == '__main__':
     # main()
     # export_libtorch('outputs/temp.pt')
-    coreml_export_main()
+    # coreml_export_main()
+    test_coreml_inference()
     # inference_model_main()

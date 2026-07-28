@@ -60,6 +60,8 @@ def test_deformable_attn_coreml_fix(setup_module_and_inputs, ref_dim):
     res2 = attn_module.vanila_forward(query, ref_points, input_flatten, spatial_shapes, None)
     assert res1.shape == res2.shape
     assert torch.allclose(res1, res2)
+    
+    
 if __name__=='__main__':
     pytest.main([
         '--color=yes',
