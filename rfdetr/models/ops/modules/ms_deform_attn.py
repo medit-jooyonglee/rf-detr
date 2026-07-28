@@ -96,7 +96,7 @@ class MSDeformAttn(nn.Module):
         xavier_uniform_(self.output_proj.weight.data)
         constant_(self.output_proj.bias.data, 0.)
 
-    def forward(self, query, reference_points, input_flatten, input_spatial_shapes,
+    def vanila_forward(self, query, reference_points, input_flatten, input_spatial_shapes,
                 input_level_start_index, input_padding_mask=None):
         """
         :param query                       (N, Length_{query}, C)
@@ -138,3 +138,137 @@ class MSDeformAttn(nn.Module):
             value, input_spatial_shapes, sampling_locations, attention_weights)
         output = self.output_proj(output)
         return output
+
+    def forward(self, query, reference_points, input_flatten, input_spatial_shapes,
+                input_level_start_index, input_padding_mask=None):
+        """
+        :param query                       (N, Length_{query}, C)
+        :param reference_points            (N, Length_{query}, n_levels, 2), range in [0, 1], top-left (0,0), bottom-right (1, 1), including padding area
+                                        or (N, Length_{query}, n_levels, 4), add additional (w, h) to form reference boxes
+        :param input_flatten               (N, \sum_{l=0}^{L-1} H_l \cdot W_l, C)
+        :param input_spatial_shapes        (n_levels, 2), [(H_0, W_0), (H_1, W_1), ..., (H_{L-1}, W_{L-1})]
+        :param input_level_start_index     (n_levels, ), [0, H_0*W_0, H_0*W_0+H_1*W_1, H_0*W_0+H_1*W_1+H_2*W_2, ..., H_0*W_0+H_1*W_1+...+H_{L-1}*W_{L-1}]
+        :param input_padding_mask          (N, \sum_{l=0}^{L-1} H_l \cdot W_l), True for padding elements, False for non-padding elements
+
+        :return output                     (N, Length_{query}, C)
+        """
+        N, Len_q, _ = query.shape
+        N, Len_in, _ = input_flatten.shape
+        assert (input_spatial_shapes[:, 0] * input_spatial_shapes[:, 1]).sum() == Len_in
+
+        value = self.value_proj(input_flatten)
+        if input_padding_mask is not None:
+            value = value.masked_fill(input_padding_mask[..., None], float(0))
+
+        
+        sampling_locations, attention_weights  = original_intermediate_calc(
+            self,
+            query,
+            reference_points,
+            input_spatial_shapes,
+            N,
+            Len_q
+            
+        )
+        # sampling_offsets = self.sampling_offsets(query).view(N, Len_q, self.n_heads, self.n_levels, self.n_points, 2)
+        # attention_weights = self.attention_weights(query).view(N, Len_q, self.n_heads, self.n_levels * self.n_points)
+
+        # # N, Len_q, n_heads, n_levels, n_points, 2
+        # if reference_points.shape[-1] == 2:
+        #     offset_normalizer = torch.stack([input_spatial_shapes[..., 1], input_spatial_shapes[..., 0]], -1)
+        #     sampling_locations = reference_points[:, :, None, :, None, :] \
+        #                          + sampling_offsets / offset_normalizer[None, None, None, :, None, :]
+        # elif reference_points.shape[-1] == 4:
+        #     sampling_locations = reference_points[:, :, None, :, None, :2] \
+        #                          + sampling_offsets / self.n_points * reference_points[:, :, None, :, None, 2:] * 0.5
+        # else:
+        #     raise ValueError(
+        #         'Last dim of reference_points must be 2 or 4, but get {} instead.'.format(reference_points.shape[-1]))
+        # attention_weights = F.softmax(attention_weights, -1)
+
+        value = value.transpose(1, 2).contiguous().view(N, self.n_heads, self.d_model // self.n_heads, Len_in)
+        output = ms_deform_attn_core_pytorch(
+            value, input_spatial_shapes, sampling_locations, attention_weights)
+        output = self.output_proj(output)
+        return output
+
+
+# ------------------------------------------------------------------
+# 기존 방식과 수정 방식을 비교하기 위한 헬퍼 연산 함수
+# ------------------------------------------------------------------
+def original_intermediate_calc(module: MSDeformAttn, query, reference_points, input_spatial_shapes, N, Len_q):
+    """기존 Rank 6 연산 로직"""
+    sampling_offsets = module.sampling_offsets(query).view(
+        N, Len_q, module.n_heads, module.n_levels, module.n_points, 2
+    )
+    attention_weights = module.attention_weights(query).view(
+        N, Len_q, module.n_heads, module.n_levels * module.n_points
+    )
+
+    if reference_points.shape[-1] == 2:
+        offset_normalizer = torch.stack(
+            [input_spatial_shapes[..., 1], input_spatial_shapes[..., 0]], -1
+        )
+        sampling_locations = (
+            reference_points[:, :, None, :, None, :]
+            + sampling_offsets / offset_normalizer[None, None, None, :, None, :]
+        )
+    elif reference_points.shape[-1] == 4:
+        sampling_locations = (
+            reference_points[:, :, None, :, None, :2]
+            + sampling_offsets / module.n_points * reference_points[:, :, None, :, None, 2:] * 0.5
+        )
+
+    attention_weights = F.softmax(attention_weights, -1).view(
+        N, Len_q, module.n_heads, module.n_levels, module.n_points
+    )
+    return sampling_locations, attention_weights
+
+
+def refactored_intermediate_calc(module: MSDeformAttn, query, reference_points, input_spatial_shapes, N, Len_q):
+    """CoreML 호환 Rank 5 연산 로직"""
+    n_total_points = module.n_levels * module.n_points
+    sampling_offsets = module.sampling_offsets(query).view(
+        N, Len_q, module.n_heads, n_total_points, 2
+    )
+    attention_weights = module.attention_weights(query).view(
+        N, Len_q, module.n_heads, n_total_points
+    )
+
+    if reference_points.shape[-1] == 2:
+        offset_normalizer = torch.stack(
+            [input_spatial_shapes[..., 1], input_spatial_shapes[..., 0]], -1
+        )
+        offset_normalizer = offset_normalizer.repeat_interleave(
+            module.n_points, dim=0
+        )
+        ref_pts = reference_points.repeat_interleave(module.n_points, dim=2)
+        sampling_locations = (
+            ref_pts[:, :, None, :, :]
+            + sampling_offsets / offset_normalizer[None, None, None, :, :]
+        )
+
+    elif reference_points.shape[-1] == 4:
+        ref_pts_xy = reference_points[:, :, None, :, :2].repeat_interleave(
+            module.n_points, dim=3
+        )
+        ref_pts_wh = reference_points[:, :, None, :, 2:].repeat_interleave(
+            module.n_points, dim=3
+        )
+        sampling_locations = (
+            ref_pts_xy
+            + sampling_offsets / module.n_points * ref_pts_wh * 0.5
+        )
+    else:
+        raise ValueError(f'not supported shape{reference_points.shape}')
+
+    attention_weights = F.softmax(attention_weights, -1)
+
+    sampling_locations = sampling_locations.view(
+        N, Len_q, module.n_heads, module.n_levels, module.n_points, 2
+    )
+    attention_weights = attention_weights.view(
+        N, Len_q, module.n_heads, module.n_levels, module.n_points
+    )
+    return sampling_locations, attention_weights
+

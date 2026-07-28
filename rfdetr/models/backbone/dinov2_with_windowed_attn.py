@@ -148,10 +148,15 @@ class WindowedDinov2WithRegistersConfig(BackboneConfigMixin, PretrainedConfig):
         num_windows=1,
         window_block_indexes=None,
         gradient_checkpointing=False,
+        antialias=True,
+        interp_mode='bilinear',
         **kwargs,
     ):
         super().__init__(**kwargs)
 
+        self.antialias = antialias
+        self.interp_mode = interp_mode
+        self.interp_mode = interp_mode
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
@@ -230,7 +235,9 @@ class WindowedDinov2WithRegistersEmbeddings(nn.Module):
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.patch_size = config.patch_size
         self.config = config
-
+        self.antialias = config.antialias
+        self.interp_mode = config.interp_mode
+        
     def interpolate_pos_encoding(self, embeddings: torch.Tensor, height: int, width: int) -> torch.Tensor:
         """
         This method allows to interpolate the pre-trained position encodings, to be able to use the model on higher
@@ -269,9 +276,9 @@ class WindowedDinov2WithRegistersEmbeddings(nn.Module):
         patch_pos_embed = nn.functional.interpolate(
             patch_pos_embed.to(dtype=torch.float32),
             size=(torch_int(height), torch_int(width)),  # Explicit size instead of scale_factor
-            mode="bicubic",
+            mode=self.interp_mode,
             align_corners=False,
-            antialias=True,
+            antialias=self.antialias,
         ).to(dtype=target_dtype)
 
         # Validate output dimensions if not tracing

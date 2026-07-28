@@ -116,8 +116,9 @@ def main():
     print(model)
     
 
-def init_and_get_model(config=None):
+def init_and_get_model(config=None, device='cpu'):
     global g_rfdetr_model
+    config = config or dict()
     if g_rfdetr_model is None:
         rf_detr = RFDETRSmall(
             
@@ -140,7 +141,8 @@ def init_and_get_model(config=None):
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
             # pretrain_weights='e:/temp/checkpoint.pth'
             
-            pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint.pth'
+            pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint.pth',
+            **config,
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
             
         )
@@ -173,9 +175,11 @@ def init_and_get_model(config=None):
                 # return dict(zip(keys, res))
                 
 
-            
         rf_detr.model.model.export()
+            
         model = ModelWrapper(rf_detr.model.model)
+        model.to(torch.device(device))
+        print('device', next(model.parameters()).device)
         g_rfdetr_model = model
         
             
@@ -214,24 +218,50 @@ def export_libtorch(output_path='e:/temp/model_libtorch.pt', shape=(384, 704)):
     
     
 def coreml_export_main():
-    from trainer import coreml_utils
-    
-    model = init_and_get_model({})
+    from trainer import coreml_utils, torch_utils
+    # device = torch.
+    model = init_and_get_model(config=dict(
+        antialias=False,
+        ))
     model.eval()
     model.requires_grad_(False)
-    # dtype = torch.float16
-    # dtype = torch.float16
-    # model.half()
+    
+    # device = torch.device('cpu')
+    # model.to()
+    device_list = [
+        torch.device(dev) for dev in ['mps']
+    ]
+    for device in device_list:
+        x0 = torch.randn(1, 3, 384, 704)
+        x0.to(device)
+        
+        y0 = model(x0)
+        print(device, 'runing complete', x0.shape, torch_utils.get_shape(y0))
+
     # model.to(dtype)
     
+    with torch.no_grad():
+        traced = torch.jit.trace(model, (x0))
+
+    # traced.save(output_path)
+    
+                    #     'pred_boxes',
+                #     'pred_logits',
+                #     'pred_masks',
+                #     'pred_labels'
+                
+    output_names = [
+        'pred_boxes', 'pred_logits', 'pred_masks', 'pred_labels'
+    ]
     coreml_model = coreml_utils.export_coreml(
-        model, [(1, 3, 384, 704)],
+        traced, [(1, 3, 384, 704)], output_names=output_names
         
     )
     coreml_model.save('temp.mlpackage')
-    # model
     
-    
+        
+        # dtype = torch.float16
+
 def inference_model_main():
     from rfdetr.datasets.xraypanoramic import get_size
     # libtorch = 'outputs/temp.pt'

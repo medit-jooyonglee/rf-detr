@@ -54,6 +54,8 @@ class Backbone(BackboneBase):
                  patch_size: int = 14,
                  num_windows: int = 4,
                  positional_encoding_size: bool = False,
+                 antialias: bool = True,
+                 interp_mode: str = 'bilinear',
                  ):
         super().__init__()
         # an example name here would be "dinov2_base" or "dinov2_registers_windowed_base"
@@ -84,6 +86,8 @@ class Backbone(BackboneBase):
             patch_size=patch_size,
             num_windows=num_windows,
             positional_encoding_size=positional_encoding_size,
+            antialias=antialias,
+            interp_mode=interp_mode,
         )
         # build encoder + projector as backbone module
         if freeze_encoder:
