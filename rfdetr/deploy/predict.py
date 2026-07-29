@@ -160,18 +160,20 @@ def init_and_get_model(config=None, device='cpu'):
                 res =  self.model(x)
                 # bboxes / logits / masks
                 bboxes, logits, masks = res
-                probs = logits.softmax(dim=-1)
+                # return bboxes, logits, masks
+                probs = logits.sigmoid()
                 bboxes, probs, masks = [torch.squeeze(v) for v in (bboxes, probs, masks)]
                 label = probs.argmax(dim=-1)
-                posit = label > 0
-                res = bboxes[posit], probs[posit],  masks[posit].to(torch.float32), label[posit]
+                # posit = label > 0
+                res = [bboxes, probs, masks, label]
+                return res
+                # # res = bboxes[posit], probs[posit],  masks[posit].to(torch.float32), label[posit]
                 # keys = [
                 #     'pred_boxes',
                 #     'pred_logits',
                 #     'pred_masks',
                 #     'pred_labels'
                 # ]
-                return res
                 # return dict(zip(keys, res))
                 
 
@@ -246,7 +248,8 @@ def coreml_export_main():
 
                 
     output_names = [
-        'pred_boxes', 'pred_logits', 'pred_masks', 'pred_labels'
+        'pred_boxes', 'pred_logits', 'pred_masks',
+        'pred_labels'
     ]
     coreml_model = coreml_utils.export_coreml(
         traced, [(1, 3, 384, 704)], output_names=output_names
@@ -260,12 +263,13 @@ def test_coreml_inference():
     from trainer import coreml_utils, torch_utils, timefn
     from rfdetr.datasets.xraypanoramic import get_size
     # coreml_utils.
-    model = coreml_utils.import_coreml('temp.mlpackage')
+    model = coreml_utils.import_coreml('temp.mlpackage', compute_units=4)
     
     @timefn
-    def coreml_run():
-        res = coreml_utils.coreml_predict(model, (x0,))
-        print(torch_utils.get_shape(res))
+    def coreml_run(img):
+        res = coreml_utils.coreml_predict(model, (img,))
+        return res
+        # print(torch_utils.get_shape(res))
         # dtype = torch.float16
         
     path = '/Users/meditai/Desktop/dataset/xray'
@@ -278,7 +282,8 @@ def test_coreml_inference():
         rsz_img = cv2.resize(img, tuple(size[::-1]), interpolation=cv2.INTER_LINEAR)
         rsz_img = np.repeat(rsz_img[None], 3, axis=0).astype(np.float32) / 255.
         rsz_img = rsz_img[None]
-        res = coreml_utils.coreml_predict(model, (rsz_img,))
+        # res = coreml_utils.coreml_predict(model, (rsz_img,))
+        res = coreml_run(rsz_img)
         input_tensor = torch_utils.data_convert(rsz_img)
         # tensor = torch_utils.data_convert(rsz_img[None], dtype=dtype)
         # with torch.no_grad():
@@ -305,7 +310,7 @@ def test_coreml_inference():
     # for _ in range(10):
     #     coreml_run()       
     '/Users/meditai/Desktop/dataset/xray'
-def inference_model_main():
+def inference_libtorch_model_main():
     from rfdetr.datasets.xraypanoramic import get_size
     # libtorch = 'outputs/temp.pt'
     libtorch = 'outputs/temp16.pt'
