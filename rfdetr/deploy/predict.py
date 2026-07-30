@@ -210,18 +210,21 @@ def export_libtorch(output_path='e:/temp/model_libtorch.pt', shape=(384, 704)):
     
 def inference_model_main():
     from rfdetr.datasets.xraypanoramic import get_size
-    libtorch = 'outputs/temp.pt'
+    # libtorch = 'outputs/temp.pt'
+    libtorch ='outputs/temp.pt'
     
     model = torch.jit.load(libtorch)
     model.cuda()
     model.eval()
     
-    path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/Radiographs/'
+    # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/Radiographs/'
+    path = 'E:/dataset/reverse_tomosynthesis/cbct_ios_dcm'
     from trainer import diskmanager, image_utils, torch_utils
     found = diskmanager.deep_search_files(path, exts=['.jpg', '.jpeg', '.JPG'])
     
     for file in found:
-        img = cv2.imread(file, cv2.IMREAD_GRAYSCALE)
+        # img = cv2.imread(file, cv2.IMREAD_GRAYSCALE)
+        img = image_utils.cv2_imread(file, flags=cv2.IMREAD_GRAYSCALE)
         size = get_size(img.shape[:2], refenrece_width=640, stride=64)
         rsz_img = cv2.resize(img, tuple(size[::-1]), interpolation=cv2.INTER_LINEAR)
         rsz_img = np.repeat(rsz_img[None], 3, axis=0).astype(np.float32) / 255.
