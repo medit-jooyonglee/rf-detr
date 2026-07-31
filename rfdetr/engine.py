@@ -457,7 +457,7 @@ def draw_preditions_boxes(new_samples, outputs, save=False, save_dir='results', 
         nms_masks_labels = []
         
         for ib in range(boxes.shape[0]):
-            posit = pred_scores[ib] > confidence_threshold
+            posit = (pred_scores[ib] > confidence_threshold) & (pred_label[ib] > 0)
             # print(posit.sum())
         
             keep_indices = non_max_suppression(boxes[ib][posit], pred_scores[ib][posit], threshold=0.6)
