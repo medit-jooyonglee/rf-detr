@@ -12,7 +12,7 @@ from collections import defaultdict
 
 import onnx
 import torch
-import onnxsim
+# import onnxsim
 import numpy as np
 from PIL import Image
 
@@ -116,8 +116,9 @@ def main():
     print(model)
     
 
-def init_and_get_model(config=None):
+def init_and_get_model(config=None, device='cpu'):
     global g_rfdetr_model
+    config = config or dict()
     if g_rfdetr_model is None:
         rf_detr = RFDETRSmall(
             
@@ -140,7 +141,8 @@ def init_and_get_model(config=None):
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
             # pretrain_weights='e:/temp/checkpoint.pth'
             
-            pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint.pth'
+            pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint.pth',
+            **config,
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
             
         )
@@ -158,24 +160,28 @@ def init_and_get_model(config=None):
                 res =  self.model(x)
                 # bboxes / logits / masks
                 bboxes, logits, masks = res
-                probs = logits.softmax(dim=-1)
+                # return bboxes, logits, masks
+                probs = logits.sigmoid()
                 bboxes, probs, masks = [torch.squeeze(v) for v in (bboxes, probs, masks)]
                 label = probs.argmax(dim=-1)
-                posit = label > 0
-                res = bboxes[posit], probs[posit],  masks[posit].to(torch.float32), label[posit]
+                # posit = label > 0
+                res = [bboxes, probs, masks, label]
+                return res
+                # # res = bboxes[posit], probs[posit],  masks[posit].to(torch.float32), label[posit]
                 # keys = [
                 #     'pred_boxes',
                 #     'pred_logits',
                 #     'pred_masks',
                 #     'pred_labels'
                 # ]
-                return res
                 # return dict(zip(keys, res))
                 
 
-            
         rf_detr.model.model.export()
+            
         model = ModelWrapper(rf_detr.model.model)
+        model.to(torch.device(device))
+        print('device', next(model.parameters()).device)
         g_rfdetr_model = model
         
             
@@ -196,19 +202,114 @@ def init_and_get_model(config=None):
 def export_libtorch(output_path='e:/temp/model_libtorch.pt', shape=(384, 704)):
     model = init_and_get_model({})
     model.eval()
+    model.requires_grad_(False)
+    # dtype = torch.float16
+    dtype = torch.float16
+    # model.half()
+    model.to(dtype)
     # model
     # model.export()  # swap in forward_export + baked position embeddings (required before tracing)
 
-    dummy = torch.randn(1, 3, *shape).cuda() #.cuda()
+    dummy = torch.randn(1, 3, *shape).cuda().half() #.cuda()
     # model(dummy)  # run once to ensure any lazy modules are initialized
-    # with torch.no_grad():
-    traced = torch.jit.trace(model, dummy)
+    with torch.no_grad():
+        traced = torch.jit.trace(model, dummy)
 
     traced.save(output_path)
     print(f'saved libtorch model to {output_path}')
     
     
-def inference_model_main():
+def coreml_export_main():
+    from trainer import coreml_utils, torch_utils
+    # device = torch.
+    model = init_and_get_model(config=dict(
+        antialias=False,
+        ))
+    model.eval()
+    model.requires_grad_(False)
+    
+    # device = torch.device('cpu')
+    # model.to()
+    device_list = [
+        torch.device(dev) for dev in ['mps']
+    ]
+    for device in device_list:
+        x0 = torch.randn(1, 3, 384, 704)
+        x0.to(device)
+        
+        y0 = model(x0)
+        print(device, 'runing complete', x0.shape, torch_utils.get_shape(y0))
+
+    # model.to(dtype)
+    
+    with torch.no_grad():
+        traced = torch.jit.trace(model, (x0))
+
+
+                
+    output_names = [
+        'pred_boxes', 'pred_logits', 'pred_masks',
+        'pred_labels'
+    ]
+    coreml_model = coreml_utils.export_coreml(
+        traced, [(1, 3, 384, 704)], output_names=output_names
+        
+    )
+    coreml_model.save('temp.mlpackage')
+    
+
+def test_coreml_inference():
+    x0 = np.random.randn(1, 3, 384, 704)
+    from trainer import coreml_utils, torch_utils, timefn
+    from rfdetr.datasets.xraypanoramic import get_size
+    libtorch = 'outputs/temp.pt'
+    
+    @timefn
+    def coreml_run(img):
+        res = coreml_utils.coreml_predict(model, (img,))
+        return res
+        # print(torch_utils.get_shape(res))
+        # dtype = torch.float16
+        
+    path = '/Users/meditai/Desktop/dataset/xray'
+    from trainer import diskmanager, image_utils, torch_utils
+    found = diskmanager.deep_search_files(path, exts=['.jpg', '.jpeg', '.JPG'])
+    
+    for file in found:
+        img = cv2.imread(file, cv2.IMREAD_GRAYSCALE)
+        size = get_size(img.shape[:2], refenrece_width=640, stride=64)
+        rsz_img = cv2.resize(img, tuple(size[::-1]), interpolation=cv2.INTER_LINEAR)
+        rsz_img = np.repeat(rsz_img[None], 3, axis=0).astype(np.float32) / 255.
+        rsz_img = rsz_img[None]
+        # res = coreml_utils.coreml_predict(model, (rsz_img,))
+        res = coreml_run(rsz_img)
+        input_tensor = torch_utils.data_convert(rsz_img)
+        # tensor = torch_utils.data_convert(rsz_img[None], dtype=dtype)
+        # with torch.no_grad():
+            # res = model(tensor)
+        # res = [torch.unsqueeze(v, 0) for v in res]
+        res = [v[None] for v in res]
+        res = torch_utils.data_convert(res, device='cpu')
+        output_keys = [
+                    'pred_boxes',
+                    'pred_logits',
+                    'pred_masks',
+                    'pred_labels'
+                ]
+        res_dicts = dict(zip(output_keys, res))
+        draw_preditions_boxes(
+            # torch_utils.data_convert(rsz_img[None]),
+            input_tensor,
+            res_dicts,
+            save=True,
+            save_dir='outputs/resulst/export'
+        )
+        
+ 
+    # for _ in range(10):
+    #     coreml_run()       
+    '/Users/meditai/Desktop/dataset/xray'
+def inference_libtorch_model_main():
     from rfdetr.datasets.xraypanoramic import get_size
     # libtorch = 'outputs/temp.pt'
     libtorch ='outputs/temp.pt'
@@ -216,6 +317,9 @@ def inference_model_main():
     model = torch.jit.load(libtorch)
     model.cuda()
     model.eval()
+    # model.requires_grad_(False)
+    
+    dtype = torch.float16
     
     # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/Radiographs/'
     path = 'E:/dataset/reverse_tomosynthesis/cbct_ios_dcm'
@@ -228,7 +332,7 @@ def inference_model_main():
         size = get_size(img.shape[:2], refenrece_width=640, stride=64)
         rsz_img = cv2.resize(img, tuple(size[::-1]), interpolation=cv2.INTER_LINEAR)
         rsz_img = np.repeat(rsz_img[None], 3, axis=0).astype(np.float32) / 255.
-        tensor = torch_utils.data_convert(rsz_img[None])
+        tensor = torch_utils.data_convert(rsz_img[None], dtype=dtype)
         with torch.no_grad():
             res = model(tensor)
         res = [torch.unsqueeze(v, 0) for v in res]
@@ -254,4 +358,6 @@ def inference_model_main():
 if __name__ == '__main__':
     # main()
     # export_libtorch('outputs/temp.pt')
-    inference_model_main()
+    # coreml_export_main()
+    test_coreml_inference()
+    # inference_model_main()

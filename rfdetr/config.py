@@ -37,6 +37,11 @@ class ModelConfig(BaseModel):
     cls_loss_coef: float = 1.0
     segmentation_head: bool = False
     mask_downsample_ratio: int = 4
+    
+    # dino-v2 antialias option
+    antialias: bool = True
+    # vanila - bicubim, for coreml-support, default value is changed as bilinear
+    interp_mode: str = 'bilinear'
 
 
 class RFDETRBaseConfig(ModelConfig):

@@ -58,6 +58,8 @@ class DinoV2(nn.Module):
             patch_size=14,
             num_windows=4,
             positional_encoding_size=37,
+            antialias=True,
+            interp_mode='bilinear',
             ):
         super().__init__()
 
@@ -66,6 +68,8 @@ class DinoV2(nn.Module):
         self.shape = shape
         self.patch_size = patch_size
         self.num_windows = num_windows
+        self.antialias = antialias
+        self.interp_mode = interp_mode
         
         # Create the encoder
         
@@ -105,6 +109,8 @@ class DinoV2(nn.Module):
                     num_windows=num_windows,
                     window_block_indexes=window_block_indexes,
                     gradient_checkpointing=gradient_checkpointing,
+                    antialias=antialias,
+                    interp_mode=interp_mode,
                 )
             else:
                 windowed_dino_config = WindowedDinov2WithRegistersConfig(
@@ -113,6 +119,9 @@ class DinoV2(nn.Module):
                     window_block_indexes=window_block_indexes,
                     num_register_tokens=0,
                     gradient_checkpointing=gradient_checkpointing,
+                    antialias=antialias,
+                    interp_mode=interp_mode,
+
                 )
             self.encoder = WindowedDinov2WithRegistersBackbone.from_pretrained(
                 name,
@@ -150,9 +159,9 @@ class DinoV2(nn.Module):
             patch_pos_embed = F.interpolate(
                 patch_pos_embed,
                 size=(height, width),
-                mode="bicubic",
+                mode=self.interp_mode,
                 align_corners=False,
-                antialias=True,
+                antialias=self.antialias,
             )
 
             # Reshape back
