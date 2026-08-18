@@ -410,7 +410,7 @@ def non_max_suppression(boxes, scores, threshold):
     return np.array(keep, dtype=int)
 
 
-def draw_preditions_boxes(new_samples, outputs, save=False, save_dir='results', nms_refinement=True):
+def draw_preditions_boxes(new_samples, outputs, save=False, save_dir='results', nms_refinement=True, fname=''):
     from trainer import torch_utils
     from rfdetr.datasets.teeth import draw_bboxes
     from trainer import utils_numpy, image_utils, time_strftime, vtk_utils
@@ -460,7 +460,7 @@ def draw_preditions_boxes(new_samples, outputs, save=False, save_dir='results', 
             posit = (pred_scores[ib] > confidence_threshold) & (pred_label[ib] > 0)
             # print(posit.sum())
         
-            keep_indices = non_max_suppression(boxes[ib][posit], pred_scores[ib][posit], threshold=0.6)
+            keep_indices = non_max_suppression(boxes[ib][posit], pred_scores[ib][posit], threshold=0.4)
             
             posit_inds = np.where(posit)[0]
             keep_indices = posit_inds[keep_indices]
@@ -518,6 +518,7 @@ def draw_preditions_boxes(new_samples, outputs, save=False, save_dir='results', 
     # num_classes = 10
     threshold = 0.5
     res_images = []
+    mask_images = []
     for i in range(num_batch):
         
         image = image_utils.to_magnitude_images(images[i])
@@ -543,15 +544,21 @@ def draw_preditions_boxes(new_samples, outputs, save=False, save_dir='results', 
             label_image = posit_labels[:, None, None] * posit_masks
             label_image = np.max(label_image, axis=0)
             restore_label_image = cv2.resize(label_image, (width, height), interpolation=cv2.INTER_NEAREST)
+            mask_images.append(restore_label_image)
             color_label_image = colors[restore_label_image]
             # image_utils.
             image = utils_numpy.apply_blending_mask(image, color_label_image)
         res_images.append(image)
 
         if save:
-            os.makedirs(save_dir, exist_ok=True)
-            save_name = f'{save_dir}/bounding_draw_{time_strftime()}.png'        
-            cv2.imwrite(save_name, image.astype(np.uint8)[..., ::-1])
+            if fname:
+                save_name = os.path.join(save_dir, fname)
+            else:
+                save_name = f'{save_dir}/bounding_draw_{time_strftime()}.png'            
+            os.makedirs(os.path.dirname(save_name), exist_ok=True)
+            
+            # cv2.imwrite(save_name, image.astype(np.uint8)[..., ::-1])
+            image_utils.cv2_imwrite(save_name, image.astype(np.uint8)[..., ::-1])
             print("Saved image with bounding boxes to: ", save_name)
-    return res_images
+    return res_images, mask_images
         

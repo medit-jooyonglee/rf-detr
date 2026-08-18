@@ -183,3 +183,4 @@ train_test.py
 
 *.png
 *.jpg
+*.json

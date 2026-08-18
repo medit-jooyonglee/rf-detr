@@ -81,16 +81,19 @@ universal_to_permanent = {
     "C": 6,
     "D": 7,
     "E": 8,
+    
     "F": 9,
     "G": 10,
     "H": 11,
     "I": 12,
     "J": 13,
+    
     "K": 20,
     "L": 21,
     "M": 22,
     "N": 23,
     "O": 24,
+    
     "P": 25,
     "Q": 26,
     "R": 27,
@@ -164,7 +167,7 @@ def create_annotation_info(labels, image, drawing=False, mask=None):
     return anno_data, bboxes
 
     
-def main():
+def tufts_to_coco():
     # data = read_json()
     data = read_pickle()
         
@@ -250,4 +253,4 @@ def main():
             ok = cv2.imwrite(f'results/{fname}.png', colors_image[..., ::-1])
 
 
-main()
+tufts_to_coco()

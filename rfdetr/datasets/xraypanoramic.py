@@ -15,6 +15,7 @@ from trainer import vtk_utils, geometry_numpy, get_logger, time_strftime, utils_
 from trainer.image_utils import cv2_imread, cv2_imwrite
 # from reversereg.preproc.sampler import cv2_imread, cv2_imwrite, to_rgba, blend_images
 from rfdetr.datasets.coco import CocoDetection
+from PIL import Image
 
 # image resolutsion
 # \xray_teeth_seg_kaggle\Teeth Segmentation JSON\d2\img
@@ -33,7 +34,20 @@ from rfdetr.datasets.coco import CocoDetection
 # E:/temp/miccai_ct\img
 
 """https://www.kaggle.com/datasets/humansintheloop/teeth-segmentation-on-dental-x-ray-imagessummary_
+    coco api + custom-datset merge@
+    
+    # index is as followed
+    
+    # https://github.com/medit-AI/labelme 
+    # from labelme 학습 데이터셋 -> coco-api json으로 변환
+    # examples\instance_segmentation\labelme2coco.py::convert_labelme_dirs_to_coco(...)
+    
+    
+    
+    1.first coco api 
+    2. cumstom -datset
 """
+
 class XrayPnoramic(Dataset):
     def __init__(self, 
                  name='train',
@@ -154,7 +168,23 @@ class XrayPnoramic(Dataset):
             return img_files[start:end], annot_files[start:end]
         else:
             return [], []
-        
+    
+    
+    def read_coco_image(self, index):
+        # examples
+        image_id = 123
+
+        coco = self.coco_apis.coco
+        # image 정보
+        image_info = coco.loadImgs([image_id])[0]
+
+        # 해당 image의 annotation id
+        ann_ids = coco.getAnnIds(imgIds=[image_id])
+
+        # annotation들
+        annotations = coco.loadAnns(ann_ids)
+        return 
+
         # mask_files = glob.glob(os.path.join(path, 'masks_machine/*.png'))
         
         
@@ -168,35 +198,14 @@ class XrayPnoramic(Dataset):
             # meta-file kaggle
             meta_file = os.path.join(path, '../meta.json')
             if os.path.exists(meta_file):
-                # with open(meta_file, "r") as f:
-                    # meta_data = json.load(f)
-                    
-                # mapping = self.read_meta_kaggle_mapping(meta_file)
-                # self.meta_kaggle_mapping = mapping
-                
-                
-                # img_files = glob.glob(os.path.join(path, 'img/*.jpg'))
-                # # mask_files = glob.glob(os.path.join(path, 'masks_machine/*.png'))
-                # annot_files = glob.glob(os.path.join(path, 'ann/*.json'))
-                # # mask_files = glob.glob(os.path.join(path, 'masks_machine/*.png'))
-                # img_files = sorted(img_files)
-                # mask_files = sorted(annot_files)
-                # if len(img_files) == len(annot_files):
-                #     pass
-                # else:
-                #     logger.warning(f'number of image files and mask files do not match in path: {path}')
-                #     src_fname = [os.path.splitext(os.path.basename(name))[0] for name in img_files]
-                #     mask_fname = [os.path.splitext(os.path.basename(name))[0] for name in mask_files]
-                #     commons, args_a, args_b = np.intersect1d(src_fname, mask_fname, return_indices=True)
-                #     img_files = [img_files[i] for i in args_a]
-                #     mask_files = [mask_files[i] for i in args_b]
-                # start, end = self.splits
-                # start, end = int(len(img_files) * start), int(len(img_files) * end)
+
                 img_files, mask_files = self.search_kaggle_data01(path, meta_file)
                 # self.source_files.extend(img_files)
                 # self.gt_files.extend(mask_files)
             else:
                 img_files, mask_files = self.search_kaggle_data02(path)
+                
+                
             self.source_files.extend(img_files)
             self.gt_files.extend(mask_files)
             
@@ -209,8 +218,11 @@ class XrayPnoramic(Dataset):
             # assert self.stride in [2, 4, 8], 'only stride 2 or 4 is supported'
             size = (size[0] // self.stride + 1) * self.stride, (size[1] // self.stride  + 1 )* self.stride
         return size
+    
 
     def __len__(self):
+        if self.coco_apis is not None:
+            return len(self.coco_apis) + len(self.source_files)
         return len(self.source_files)
         
     
@@ -247,9 +259,60 @@ class XrayPnoramic(Dataset):
         else:
             pass
         return target
+    
+    def _read_coco_image(self, index, resizing=True):
+        src, target = self.coco_apis[index]
+        src = np.array(src)
 
-                 
+        
+        # src = np.arr
+        if resizing:
+
+                
+            # self.resize_image_and_target(src, target)
+            target_rsz_img = self.get_target_image_size(src.shape[:2])
+            resizer = ResizeCocoSample(target_rsz_img)
+            rsz_src, rsz_target = resizer(src, target)
+            rsz_src = np.transpose(rsz_src, [2, 0, 1]) if rsz_src.ndim == 3 else rsz_src[None, ...]
+            # return rsz_src, rsz_target
+            #  = rsz_target
+            src, target = rsz_src, rsz_target
+            # return rsz_src, rsz_target
+        else:
+            # c h, w 
+            src = np.transpose(src, [2, 0, 1]) if src.ndim == 3 else src[None, ...]
+            # return src, target
+        
+        # masks & segmentation key
+        # is_crowd & iscrowd
+        
+        target['segmentation'] = target.get('masks')
+        target['is_crowd'] = target.get('iscrowd')
+        src = src / 255.0
+        # self.resize_image_and_target(src, target)
+        return src, target
+                    
+        # target_rsz_img = self.get_target_image_size(src.shape[:2])
+        # resizer = ResizeCocoSample(target_rsz_img)
+        # return resizer(src, target)
+        # return self.self.resize_coco(image, target)
+
     def _read_image(self, index):
+        if self.coco_apis is not None:
+            num_len = len(self.coco_apis)
+            src, target = self._read_coco_image(index) if index < num_len else self._read_custom_image(index - num_len)
+
+            # return self.parse_item_coco(index)
+            # coco read
+            return src, target
+        else:
+            return self._read_custom_image(index)
+            
+        
+             
+    def _read_custom_image(self, index):
+        
+        
         img_file = self.source_files[index]
         mask_file = self.gt_files[index]
         
@@ -308,6 +371,14 @@ def label_to_fdi(labels, num_classes:int=32):
         mapping = np.arange(256, dtype=np.int64)
         mapping[np.arange(fdi_sort.size)] = fdi_sort
         return mapping[labels]
+    elif num_classes in [4, 5]:
+        mapping = np.arange(256, dtype=np.int64)
+        mapping[np.arange(fdi_sort.size)] = fdi_sort // 10
+        return mapping[labels]
+    elif num_classes == [2, 3]:
+        mapping = np.arange(256, dtype=np.int64)
+        mapping[np.arange(fdi_sort.size)] = np.where(fdi_sort > 0,  fdi_sort // 20 + 1, 0) 
+        return mapping[labels]
     else:
         return labels
         
@@ -363,8 +434,6 @@ class XrayPnoaramicInstance(XrayPnoramic):
     def __init__(self, 
                  
                  img_folder,
-                 annot_file='',
-                 transforms=None,
                  include_masks=False,
                  name='train',
                  debug=False,
@@ -374,6 +443,7 @@ class XrayPnoaramicInstance(XrayPnoramic):
                  splits=None,
                  bg_crop_prob=0.15,
                  augment_en=True,
+                 coco_directories: List[Tuple[str, str]]=None,
                  **kwargs):
 
         default_splits = {
@@ -382,6 +452,14 @@ class XrayPnoaramicInstance(XrayPnoramic):
             'valid': (0.85, 0.9),
             'test': (0.9, 1.0),
         }
+        self.coco_directories = coco_directories
+        if coco_directories is not None and len(coco_directories) > 0:
+            # TODO: complete merge of coco datasets
+            assert len(coco_directories) == 1, 'we only support one coco directory for now. '
+            img_folder, annot_file = coco_directories[0]
+            self.coco_apis = CocoDetection(img_folder, annot_file, None, include_masks)
+        else:
+            self.coco_apis = None
         self.augment_en = augment_en
         path_lists = [img_folder] if isinstance(img_folder, str) else img_folder
         XrayPnoramic.__init__(self,
@@ -491,7 +569,33 @@ class XrayPnoaramicInstance(XrayPnoramic):
         return target_label, target_offset
 
     
+    def file_name(self, index):
+        if self.coco_apis is not None:
+            if index < len(self.coco_apis):
+                coco_relative_file = self.coco_apis.coco.loadImgs([self.coco_apis.ids[index]])[0]['file_name']
+                coco_base_directory = os.path.dirname(self.coco_directories[0][-1])
+                full_path = os.path.join(coco_base_directory, coco_relative_file).replace('\\', '/')
+                return full_path
+            else:
+                index = index - len(self.coco_apis)
+        else:
+            return self.source_files[index]
+    
     def parse_item_coco(self, index, norm_bbox=True, box_format: Literal['xcycwh', 'xywh']='xcycwh', return_raw_annotation=False):
+        # 
+        if self.coco_apis is not None:
+            if index < len(self.coco_apis):
+                return self._read_coco_image(index)
+                # return self.coco_apis[index]
+            else:
+                index = index - len(self.coco_apis)
+                
+        else:
+            index = index
+        
+        
+        
+        
         img_file = self.source_files[index]
         mask_file = self.gt_files[index]
         
@@ -767,8 +871,12 @@ class XrayPnoaramicInstance(XrayPnoramic):
             # return src_rsz, annot
 
         
+
+
+        
     def coco_json_export(self, base_dir='', debug_break=-1):
         
+        base_dir = base_dir.replace('\\', '/')
         class_names = [
             'gum', *[str(v) for v in fdi_sort], 'unknown'
 
@@ -801,7 +909,9 @@ class XrayPnoaramicInstance(XrayPnoramic):
                 
                 # print(f"Error processing index {i}: {e}")
                 continue
-            filename = self.source_files[i]
+            # filename = self.source_files[i]
+            filename = self.file_name(i)
+            assert filename.startswith(base_dir), f"Filename {filename} does not start with base_dir {base_dir}"
             relative_filename = os.path.relpath(filename, base_dir)
             # annotation_id = 1
             image, target = item
@@ -816,7 +926,11 @@ class XrayPnoaramicInstance(XrayPnoramic):
 
             })
             keys = ['boxes', 'labels', 'area', 'is_crowd', 'segmentation']
-            bboxes, labels, areas, iscrowd, segmentation = [target[key] for key in keys]
+            bboxes, labels, areas, iscrowd, segmentation = [target.get(key, None) for key in keys]
+            # is_crowd & is_crowd comaptibie
+            # if iscrowd is None:
+            #     iscrowd = [False] * len(bboxes)
+            
 
             for i, (box, label, area, crowd) in enumerate(zip(bboxes, labels, areas, iscrowd)):
                 
@@ -875,12 +989,13 @@ def xyxy_to_xywh(in_bboxes):
 
 
 class XrayPnoaramicInstanceCoco(CocoDetection):
-    def __init__(self, img_folder, annot_file, transforms=None, include_masks=False, **kwargs):
+    def __init__(self, img_folder, annot_file, transforms=None, include_masks=False, coco_directories=None,**kwargs):
         CocoDetection.__init__(self, img_folder, annot_file, transforms, include_masks)
         self.include_masks = include_masks
         self.base_datset = XrayPnoaramicInstance(
             img_folder, 
             include_masks=include_masks,
+            coco_directories=coco_directories,
             **kwargs,
                             #  include_masks=False,
         )
@@ -1045,6 +1160,7 @@ def test_build_coco_json():
         
     # img_folder = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2'
     base_dir = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays'
+    # base_dir = 'E:\dataset\reverse_tomosynthesis\kaggle_xrays\cbct_ios_dcm'
     # ann_file = ''
     # dataset = XrayPnoaramicInstance(img_folder, '', None, True)
     
@@ -1052,14 +1168,18 @@ def test_build_coco_json():
     include_masks = True
     dataset = XrayPnoaramicInstance(
         img_folder= [
-            'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2',
-            'E:/dataset/reverse_tomosynthesis/kaggle_xrays/kaggle_2222',
+            # 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2',
+            # 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/kaggle_2222',
+            # 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm'
             
-        ]
-        ,
+        ],
         num_classes=num_classes,
         # stride=4,
         include_masks=include_masks,
+        coco_directories=[
+            ('E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm', 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm/annotations.json')
+        ],
+        
         name='train',
         splits={
             'train': (0, 1)
@@ -1084,15 +1204,17 @@ def test_load_coco_dataset():
     
     from trainer import get_logger
     
+    save_dir = 'outputs/result'
+    
     logger = get_logger()
     # img_folder = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2'
     # img_folder = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2'
     # path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle'
     kaggle_path2 = [
-        'E:/dataset/reverse_tomosynthesis/kaggle_xrays/kaggle_2222',
-        'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2',
-        '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2/',
-        '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/',
+        # 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/kaggle_2222',
+        # 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2',
+        # '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2/',
+        # '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/',
     ]
     
     # ann_file = ''
@@ -1101,8 +1223,9 @@ def test_load_coco_dataset():
     # path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle'
     # xray_coco.json'
     
-    annot_file = '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_coco_33_seg.json'
+    # annot_file = '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_coco_33_seg.json'
     # annot_file = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/xray_coco_33_seg.json'
+    annot_file = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_coco_33_seg.json'
     
     dataset = XrayPnoaramicInstanceCoco(
         
@@ -1116,7 +1239,10 @@ def test_load_coco_dataset():
         None,
         include_masks=True,
         num_classes=32,
-        name='train',
+        name='valid',
+                coco_directories=[
+            ('E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm', 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm/annotations.json')
+        ],
         # splits={
             # 'train': (0, 0.)
         # }
@@ -1157,10 +1283,13 @@ def test_load_coco_dataset():
         denorm_bboxes = boxes_to_xyxy(target_bboxes, size[::-1])
         
         drawing = cv2.cvtColor(img[0]*255, cv2.COLOR_GRAY2BGR)
+        # for table
+        # visualize_number = 4
+        # if 
         # denorm_bboxes = denorm_bboxes.reshape([-1, 2]).clip(0, size)
         denorm_bboxes_i = denorm_bboxes.astype(np.int32)
-        
-        target_fdi = label_to_fdi(target_label)
+        test_vis_class = 32
+        target_fdi = label_to_fdi(target_label, test_vis_class)
         
         from trainer import vtk_utils
         colors_fdis = vtk_utils.get_teeth_color_table(normalize=False)
@@ -1180,7 +1309,6 @@ def test_load_coco_dataset():
                 
                 drawing = utils_numpy.apply_blending_mask(drawing, target_fdi_color_image, alpha=0.5)
             
-        save_dir = 'outputs/result'
         os.makedirs(save_dir, exist_ok=True)
         cv2.imwrite(f'{save_dir}/xray_{i}.png', drawing[..., ::-1])
         
@@ -1236,6 +1364,12 @@ def build(image_set, args, resolution):
     # annot_file = 
     # annot_file
     args_dict = dict(args.__dict__)
+    if image_set == 'train':
+        # args_dict['augment_en'] = True
+        coco_directories = getattr(args, 'coco_directories', None)
+    else:
+        coco_directories = None
+        
 
     dataset = XrayPnoaramicInstanceCoco(
         img_folder=img_folder,
@@ -1246,6 +1380,8 @@ def build(image_set, args, resolution):
         num_classes=getattr(args, 'num_classes', 2),
         bg_crop_prob=getattr(args, 'bg_crop_prob', 0.15),
         augment_en=False,
+        coco_directories=coco_directories,
+        
         # **args_dict
     )
     
@@ -1253,10 +1389,314 @@ def build(image_set, args, resolution):
     return dataset
 
 
+
+class ResizeCocoSample:
+    """
+    Resize (image, target) pair.
+
+    target format:
+    {
+        "boxes": np.ndarray[N, 4],       # xyxy
+        "labels": np.ndarray[N],
+        "masks": np.ndarray[N, H, W],    # optional
+        ...
+    }
+
+    mask_resize_mode:
+        "full" : full mask resize
+        "roi"  : bbox 영역만 crop -> resize -> target canvas paste
+    """
+
+    def __init__(
+        self,
+        size: Tuple[int, int],
+        keep_ratio: bool = True,
+        mask_resize_mode: str = "roi",
+    ):
+        """
+        size = (target_h, target_w)
+        """
+        self.target_h, self.target_w = size
+        self.keep_ratio = keep_ratio
+        self.mask_resize_mode = mask_resize_mode
+        self.refer_width = 640
+
+    def __call__(self, image: np.ndarray, target: dict):
+        src_h, src_w = image.shape[:2]
+        
+        
+        # (h, w)
+        # size =  get_target_image_size([src_h, src_w], self.refer_width)
+
+        if self.keep_ratio:
+            image, scale_x, scale_y, offset_x, offset_y = \
+                self._resize_letterbox(image)
+        else:
+            image = cv2.resize(
+                image,
+                (self.target_w, self.target_h),
+                interpolation=cv2.INTER_LINEAR,
+            )
+
+            scale_x = self.target_w / src_w
+            scale_y = self.target_h / src_h
+            offset_x = 0
+            offset_y = 0
+
+        target = dict(target)
+
+        boxes_src = np.asarray(
+            target.get("boxes", []),
+            dtype=np.float32,
+        ).reshape(-1, 4)
+
+        boxes_dst = self._resize_boxes(
+            boxes_src,
+            scale_x,
+            scale_y,
+            offset_x,
+            offset_y,
+        )
+
+        target["boxes"] = boxes_dst
+
+        if "masks" in target and target["masks"] is not None:
+            masks = target["masks"]
+
+            if self.mask_resize_mode == "roi":
+                target["masks"] = self._resize_masks_roi(
+                    masks,
+                    boxes_src,
+                    boxes_dst,
+                )
+            else:
+                target["masks"] = self._resize_masks_full(
+                    masks,
+                    scale_x,
+                    scale_y,
+                    offset_x,
+                    offset_y,
+                )
+
+        target["size"] = np.array(
+            [self.target_h, self.target_w],
+            dtype=np.int64,
+        )
+
+        return image, target
+
+    # ---------------------------------------------------------
+    # image
+    # ---------------------------------------------------------
+
+    def _resize_letterbox(self, image):
+        src_h, src_w = image.shape[:2]
+
+        scale = min(
+            self.target_w / src_w,
+            self.target_h / src_h,
+        )
+
+        new_w = int(round(src_w * scale))
+        new_h = int(round(src_h * scale))
+
+        resized = cv2.resize(
+            image,
+            (new_w, new_h),
+            interpolation=cv2.INTER_LINEAR,
+        )
+
+        offset_x = (self.target_w - new_w) // 2
+        offset_y = (self.target_h - new_h) // 2
+
+        if image.ndim == 3:
+            canvas = np.zeros(
+                (self.target_h, self.target_w, image.shape[2]),
+                dtype=image.dtype,
+            )
+        else:
+            canvas = np.zeros(
+                (self.target_h, self.target_w),
+                dtype=image.dtype,
+            )
+
+        canvas[
+            offset_y:offset_y + new_h,
+            offset_x:offset_x + new_w,
+        ] = resized
+
+        return (
+            canvas,
+            scale,
+            scale,
+            offset_x,
+            offset_y,
+        )
+
+    # ---------------------------------------------------------
+    # bbox
+    # ---------------------------------------------------------
+
+    def _resize_boxes(
+        self,
+        boxes,
+        scale_x,
+        scale_y,
+        offset_x,
+        offset_y,
+    ):
+        if boxes.size == 0:
+            return boxes.copy()
+
+        boxes = boxes.copy()
+
+        boxes[:, [0, 2]] *= scale_x
+        boxes[:, [1, 3]] *= scale_y
+
+        boxes[:, [0, 2]] += offset_x
+        boxes[:, [1, 3]] += offset_y
+
+        boxes[:, [0, 2]] = np.clip(
+            boxes[:, [0, 2]],
+            0,
+            self.target_w,
+        )
+
+        boxes[:, [1, 3]] = np.clip(
+            boxes[:, [1, 3]],
+            0,
+            self.target_h,
+        )
+
+        return boxes
+
+    # ---------------------------------------------------------
+    # mask: optimized ROI resize
+    # ---------------------------------------------------------
+
+    def _resize_masks_roi(
+        self,
+        masks,
+        boxes_src,
+        boxes_dst,
+    ):
+        """
+        Full resolution mask를 resize하지 않고
+        bbox 영역만 잘라서 resize.
+
+        입력:
+            masks: [N, src_h, src_w]
+
+        출력:
+            [N, target_h, target_w]
+        """
+
+        masks = np.asarray(masks)
+        masks_dtype = masks.dtype
+        n = len(masks)
+
+        out_masks = np.zeros(
+            (n, self.target_h, self.target_w),
+            dtype=masks.dtype,
+        )
+
+        for i in range(n):
+            sx1, sy1, sx2, sy2 = boxes_src[i]
+
+            # bbox -> integer crop range
+            sx1 = max(int(np.floor(sx1)), 0)
+            sy1 = max(int(np.floor(sy1)), 0)
+            sx2 = min(int(np.ceil(sx2)), masks.shape[2])
+            sy2 = min(int(np.ceil(sy2)), masks.shape[1])
+
+            if sx2 <= sx1 or sy2 <= sy1:
+                continue
+
+            # -------------------------------------------
+            # 핵심:
+            # 4K full mask를 resize하지 않고 ROI만 추출
+            # -------------------------------------------
+
+            mask_crop = masks[
+                i,
+                sy1:sy2,
+                sx1:sx2,
+            ]
+
+            dx1, dy1, dx2, dy2 = boxes_dst[i]
+
+            dx1 = max(int(np.floor(dx1)), 0)
+            dy1 = max(int(np.floor(dy1)), 0)
+            dx2 = min(int(np.ceil(dx2)), self.target_w)
+            dy2 = min(int(np.ceil(dy2)), self.target_h)
+
+            dst_w = dx2 - dx1
+            dst_h = dy2 - dy1
+
+            if dst_w <= 0 or dst_h <= 0:
+                continue
+
+            mask_small = cv2.resize(
+                mask_crop.astype(np.uint8),
+                (dst_w, dst_h),
+                interpolation=cv2.INTER_NEAREST,
+            ).astype(masks_dtype)
+
+            out_masks[
+                i,
+                dy1:dy2,
+                dx1:dx2,
+            ] = mask_small
+
+        return out_masks
+
+    # ---------------------------------------------------------
+    # mask: simple/reference implementation
+    # ---------------------------------------------------------
+
+    def _resize_masks_full(
+        self,
+        masks,
+        scale_x,
+        scale_y,
+        offset_x,
+        offset_y,
+    ):
+        masks = np.asarray(masks)
+
+        out_masks = np.zeros(
+            (
+                len(masks),
+                self.target_h,
+                self.target_w,
+            ),
+            dtype=np.uint8,
+        )
+
+        for i, mask in enumerate(masks):
+            src_h, src_w = mask.shape
+
+            new_w = int(round(src_w * scale_x))
+            new_h = int(round(src_h * scale_y))
+
+            resized = cv2.resize(
+                mask,
+                (new_w, new_h),
+                interpolation=cv2.INTER_NEAREST,
+            )
+
+            out_masks[
+                i,
+                offset_y:offset_y + new_h,
+                offset_x:offset_x + new_w,
+            ] = resized
+
+        return out_masks
+
 # def test_
         
 if __name__ == '__main__':
     # main_xraypanoramic_instance()
     # test_build_coco_json()
-    # test_build_coco_json()
+    
     test_load_coco_dataset()

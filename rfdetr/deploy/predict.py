@@ -79,7 +79,8 @@ def main():
         # "data/xray_teeth33/test/images/000000.png",]
     from trainer import torch_utils
     # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle/Teeth Segmentation JSON/d2/img/'
-    path = 'E:/dataset/reverse_tomosynthesis/cbct_ios_dcm'
+    # path = 'E:/dataset/reverse_tomosynthesis/cbct_ios_dcm'
+    path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON'
     # path = 
     
     found = diskmanager.deep_search_files(path, exts=['.jpg', '.jpeg'])
@@ -116,7 +117,7 @@ def main():
     print(model)
     
 
-def init_and_get_model(config=None, device='cpu'):
+def init_and_get_model(config=None, device='cuda'):
     global g_rfdetr_model
     config = config or dict()
     if g_rfdetr_model is None:
@@ -125,7 +126,7 @@ def init_and_get_model(config=None, device='cpu'):
             patch_size=16,
             num_windows=4,
             # num_queries=100,
-            num_queries=100,
+            num_queries=50,
             group_detr=5,
             num_select=30,
             encoder='dinov2_windowed_tiny',
@@ -213,7 +214,7 @@ def export_libtorch(output_path='e:/temp/model_libtorch.pt', shape=(384, 704)):
     dummy = torch.randn(1, 3, *shape).cuda().half() #.cuda()
     # model(dummy)  # run once to ensure any lazy modules are initialized
     with torch.no_grad():
-        traced = torch.jit.trace(model, dummy)
+        traced = torch.jit.trace(model, dummy, check_trace=False)
 
     traced.save(output_path)
     print(f'saved libtorch model to {output_path}')
@@ -321,20 +322,38 @@ def inference_libtorch_model_main():
     
     dtype = torch.float16
     
+    filter_image_size = [
+        (1000, 2000)
+    ]
+    
     # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/Radiographs/'
     path = 'E:/dataset/reverse_tomosynthesis/cbct_ios_dcm'
+    # path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON'
     from trainer import diskmanager, image_utils, torch_utils
     found = diskmanager.deep_search_files(path, exts=['.jpg', '.jpeg', '.JPG'])
-    
+    save = True
+    mask_save_dir = 'E:/dataset/reverse_tomosynthesis/cbct_ios_dcm_masks'
     for file in found:
         # img = cv2.imread(file, cv2.IMREAD_GRAYSCALE)
         img = image_utils.cv2_imread(file, flags=cv2.IMREAD_GRAYSCALE)
-        size = get_size(img.shape[:2], refenrece_width=640, stride=64)
+        shape = img.shape[:2]
+        if np.all([np.all(shape > np.array(size0)) for size0 in filter_image_size]):
+            pass
+        else:
+            print(f"Skipping file {file} due to size {shape}.")
+            continue
+        # size = get_size(img.shape[:2], refenrece_width=640, stride=64)
+        size = (384, 704)
         rsz_img = cv2.resize(img, tuple(size[::-1]), interpolation=cv2.INTER_LINEAR)
         rsz_img = np.repeat(rsz_img[None], 3, axis=0).astype(np.float32) / 255.
         tensor = torch_utils.data_convert(rsz_img[None], dtype=dtype)
-        with torch.no_grad():
-            res = model(tensor)
+        try:
+            with torch.no_grad():
+                res = model(tensor)
+        except Exception as e:
+            print(e)
+            print('model inference failed')
+            continue
         res = [torch.unsqueeze(v, 0) for v in res]
         output_keys = [
                     'pred_boxes',
@@ -343,21 +362,27 @@ def inference_libtorch_model_main():
                     'pred_labels'
                 ]
         res_dicts = dict(zip(output_keys, res))
-        draw_preditions_boxes(
+        color_image, mask_iamge = draw_preditions_boxes(
             tensor,
             res_dicts,
-            save=True,
-            save_dir='outputs/resulst/export'
+            save=save,
+            save_dir='outputs/export/',
+            fname=os.path.relpath(file, path)
         )
-        
-        
-        
-    
+        assert len(mask_iamge) == 1, "Expected a single mask image."
+        savename = os.path.join(mask_save_dir, os.path.relpath(file, path))
+        os.makedirs(os.path.dirname(savename), exist_ok=True)
+        # cv2.imwrite(savename, mask_iamge[0].astype(np.uint8))
+        from trainer import image_utils
+        image_utils.cv2_imwrite(savename.replace('.jpg', '.png'), mask_iamge[0].astype(np.uint8))
+        image_utils.cv2_imwrite(savename, color_image[0].astype(np.uint8)[..., ::-1])  # Convert RGB to BGR for saving with OpenCV
+        print(f"Saved mask image to: {savename.replace('.jpg', '.png')}")
 
     
 if __name__ == '__main__':
     # main()
     # export_libtorch('outputs/temp.pt')
     # coreml_export_main()
-    test_coreml_inference()
-    # inference_model_main()
+    # test_coreml_inference()
+    inference_libtorch_model_main()
+# 

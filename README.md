@@ -259,13 +259,37 @@ We welcome and appreciate all contributions! If you notice any issues or bugs, h
 
 xray 데이터셋
 
+
+
+|데이터셋 이름|url|변환 코드| local 경로|
+|------|---|---|---|
+|Teeth Segmentation on dental X-ray images|https://www.kaggle.com/datasets/humansintheloop/teeth-segmentation-on-dental-x-ray-images|없음|E:\dataset\reverse_tomosynthesis\kaggle_xrays\xray_teeth_seg_kaggle|
+|The Tufts Dental Database 2022|https://www.kaggle.com/datasets/tommyngx/the-tufts-dental-database-2022/data|rfdetr\util\dataloader.py::tufts_to_coco|E:\dataset\reverse_tomosynthesis\kaggle_xrays\kaggle_2222|
+|UFBA-425|https://figshare.com/articles/dataset/UFBA-425/29827475|확인필요|-|-|
+|A dual-labeled dataset|https://www.kaggle.com/datasets/zwbzwb12341234/a-dual-labeled-dataset|-|-|-|
+
+
+
+
+* 변환코드는 rfdetr\datasets\xraypanoramic.py 에서 읽을수 있게 coco-format으로 변환 스크립트
+* https://www.kaggle.com/datasets/zwbzwb12341234/a-dual-labeled-dataset
+
+<!-- * 추가 확인 필요 데이터셋 :  // E:\dataset\reverse_tomosynthesis\kaggle_xrays\ufba-425 -->
 두개 데이터 타입 지원
 
-한개는 
-* Teeth Segmentation JSON/d2 폴더 구성의 데이터셋 : "./ann" json  annottation 데이터가 포함되어 있음
 
-다른 하나는
+한개는 []()
+
+* Teeth Segmentation JSON/d2 폴더 구성의 데이터셋 : "./ann" json  annotation 데이터가 포함되어 있음
+
+다른 하나는()
 * segmetation info. json파일이 큰 용량으로 지원되고, 상기 "./ann" 형식으로 변환해서 사용한다.(dataloader.py)
   rfdetr/util/dataloader.py
 
-  
+
+
+기타 xray 유용한 데이터셋
+* xray 치아 진단 데이터
+* https://www.kaggle.com/datasets/abbasseifossadat/dental-radiography-segmentation
+* https://www.kaggle.com/datasets/imtkaggleteam/dental-opg-xray-dataset
+* https://www.kaggle.com/code/thunderpede/dental-x-rays-caries-segmentation-unet/input?scriptVersionId=135534755&select=labels
