@@ -42,7 +42,7 @@ g_rfdetr_model = None
 def main():
     from trainer import diskmanager, image_utils
 # 
-    model = init_and_get_model()
+    model = init_and_get_model(export=False)
     
     # model = rf_detr.model.model
     
@@ -98,7 +98,7 @@ def main():
         
         with torch.no_grad():
             outputs = model(img_tensor)
-            print(outputs.keys())
+            # print(outputs.keys())
             print(outputs['pred_logits'].shape, outputs['pred_boxes'].shape)
             if 'pred_masks' in outputs:
                 print(outputs['pred_masks'].shape)
@@ -117,7 +117,7 @@ def main():
     print(model)
     
 
-def init_and_get_model(config=None, device='cuda'):
+def init_and_get_model(config=None, device='cuda', export=False):
     global g_rfdetr_model
     config = config or dict()
     if g_rfdetr_model is None:
@@ -160,7 +160,13 @@ def init_and_get_model(config=None, device='cuda'):
                 assert x.shape[0] == 1, "Only batch size of 1 is supported for this wrapper."
                 res =  self.model(x)
                 # bboxes / logits / masks
-                bboxes, logits, masks = res
+                # not export option
+                if isinstance(res, dict):
+                    bboxes = res['pred_boxes']
+                    logits = res['pred_logits']
+                    masks = res['pred_masks']
+                else:
+                    bboxes, logits, masks = res
                 # return bboxes, logits, masks
                 probs = logits.sigmoid()
                 bboxes, probs, masks = [torch.squeeze(v) for v in (bboxes, probs, masks)]
@@ -178,13 +184,19 @@ def init_and_get_model(config=None, device='cuda'):
                 # return dict(zip(keys, res))
                 
 
-        rf_detr.model.model.export()
+        if export:
+            rf_detr.model.model.export()
             
-        model = ModelWrapper(rf_detr.model.model)
-        model.to(torch.device(device))
-        print('device', next(model.parameters()).device)
-        g_rfdetr_model = model
-        
+            model = ModelWrapper(rf_detr.model.model)
+            model.to(torch.device(device))
+            print('device', next(model.parameters()).device)
+            g_rfdetr_model = model
+        else:
+            g_rfdetr_model = rf_detr.model.model
+            g_rfdetr_model.eval()
+            g_rfdetr_model.to(torch.device(device))
+            print('device', next(g_rfdetr_model.parameters()).device)
+            
             
                 
     return g_rfdetr_model
@@ -380,9 +392,9 @@ def inference_libtorch_model_main():
 
     
 if __name__ == '__main__':
-    # main()
+    main()
     # export_libtorch('outputs/temp.pt')
     # coreml_export_main()
     # test_coreml_inference()
-    inference_libtorch_model_main()
+    # inference_libtorch_model_main()
 # 
