@@ -292,10 +292,7 @@ class XrayPnoramic(Dataset):
         # self.resize_image_and_target(src, target)
         return src, target
                     
-        # target_rsz_img = self.get_target_image_size(src.shape[:2])
-        # resizer = ResizeCocoSample(target_rsz_img)
-        # return resizer(src, target)
-        # return self.self.resize_coco(image, target)
+
 
     def _read_image(self, index):
         if self.coco_apis is not None:
@@ -456,8 +453,17 @@ class XrayPnoaramicInstance(XrayPnoramic):
         if coco_directories is not None and len(coco_directories) > 0:
             # TODO: complete merge of coco datasets
             assert len(coco_directories) == 1, 'we only support one coco directory for now. '
-            img_folder, annot_file = coco_directories[0]
-            self.coco_apis = CocoDetection(img_folder, annot_file, None, include_masks)
+            coco_img_folder, coco_annot_file = coco_directories[0]
+            self.coco_apis = CocoDetection(coco_img_folder, coco_annot_file, None, include_masks)
+            
+            # \\ -> / handling...
+            coco = self.coco_apis.coco
+            for image_info in coco.dataset.get("images", []):
+                file_name = image_info.get("file_name")
+
+                if isinstance(file_name, str):
+                    image_info["file_name"] = file_name.replace("\\", "/")
+            coco.createIndex()
         else:
             self.coco_apis = None
         self.augment_en = augment_en
@@ -578,11 +584,15 @@ class XrayPnoaramicInstance(XrayPnoramic):
                 return full_path
             else:
                 index = index - len(self.coco_apis)
+                return self.source_files[index]
         else:
             return self.source_files[index]
     
     def parse_item_coco(self, index, norm_bbox=True, box_format: Literal['xcycwh', 'xywh']='xcycwh', return_raw_annotation=False):
         # 
+        # self.coco_apis.coco.dataset.get('images')
+
+        
         if self.coco_apis is not None:
             if index < len(self.coco_apis):
                 return self._read_coco_image(index)
@@ -1002,21 +1012,25 @@ class XrayPnoaramicInstanceCoco(CocoDetection):
         
         self.index_coco_id = []
             
-        # image id mapping    
+        # image id mapping    / rf-detr evaluatiopn. mapping....
         if len(self.coco.imgs) > 0:
             # assumption image id
             meta = [self.coco.loadImgs(i)[0] for i in range(len(self.coco.imgs))]
             img_id_mapping = {v['file_name'].replace('\\', '/').lower(): v['id'] for v in meta}
             image_files = list(img_id_mapping.keys())
             
-            source_clean = [name.strip().replace('\\', '/').lower() for name in self.base_datset.source_files]
+            # source_clean = [name.strip().replace('\\', '/').lower() for name in self.base_datset.source_files]
+            source_clean  = [self.base_datset.file_name(i).strip().replace('\\', '/').lower() for i in range(len(self.base_datset))]
             
             matched_idx = []
             for abs_path in source_clean:
+                matched = -1
                 for idx, relat in enumerate(image_files):
                     if abs_path.endswith(relat):
-                        matched_idx.append(idx)
+                        matched = idx
+                        # matched_idx.append(idx)
                         break
+                matched_idx.append(matched)
                     
             assert len(matched_idx) == len(source_clean), 'some images are not matched'
             self.index_coco_id = matched_idx
@@ -1213,8 +1227,8 @@ def test_load_coco_dataset():
     kaggle_path2 = [
         # 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/kaggle_2222',
         # 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2',
-        # '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2/',
-        # '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/',
+        '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2/',
+        '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/',
     ]
     
     # ann_file = ''
@@ -1223,9 +1237,10 @@ def test_load_coco_dataset():
     # path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle'
     # xray_coco.json'
     
-    # annot_file = '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_coco_33_seg.json'
+    annot_file = '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_coco_33_seg.json'
     # annot_file = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/xray_coco_33_seg.json'
-    annot_file = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_coco_33_seg.json'
+    # annot_file = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_coco_33_seg.json' 
+    annot_file = None
     
     dataset = XrayPnoaramicInstanceCoco(
         
@@ -1239,9 +1254,10 @@ def test_load_coco_dataset():
         None,
         include_masks=True,
         num_classes=32,
-        name='valid',
+        name='train',
                 coco_directories=[
-            ('E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm', 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm/annotations.json')
+            # ('E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm', 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm/annotations.json')
+            ('/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm/', '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm/annotations.json')
         ],
         # splits={
             # 'train': (0, 0.)
@@ -1258,10 +1274,11 @@ def test_load_coco_dataset():
     }
     test_iter = 100
     for i in tqdm.tqdm(range(len(dataset))):
-        img, target = dataset[i]
         # print(torch_utils.get_shape([img, target]))
         if i >= test_iter:
             break
+        i = np.random.randint(0, len(dataset))
+        img, target = dataset[i]
 
         img, target = torch_utils.to_numpy([img, target])
         
@@ -1350,12 +1367,14 @@ def boxes_to_xyxy(boxes, size):
     # with open('xray_coco.json', 'w') as f:
     #     json.dump(res, f)
 
-
+import copy
 
 def build(image_set, args, resolution):
     img_folder = args.dataset_dir
     # annotation file is builed by functoin . see teeth.py::test_build_teethdsata
-    annot_file = getattr(args, 'annot_file', '../../xray_coco.json')
+    args_dict = copy.deepcopy(dict(args.__dict__))
+    # args_dict = 
+    annot_file = args_dict.pop('annot_file', '../../xray_coco.json')
     if os.path.exists(annot_file):
         pass
     else:
@@ -1363,11 +1382,11 @@ def build(image_set, args, resolution):
         assert os.path.exists(annot_file), f'annotation file not found: {annot_file}'
     # annot_file = 
     # annot_file
-    args_dict = dict(args.__dict__)
     if image_set == 'train':
         # args_dict['augment_en'] = True
-        coco_directories = getattr(args, 'coco_directories', None)
+        coco_directories = args_dict.pop('coco_directories', None)
     else:
+        args_dict.pop('coco_directories', None)
         coco_directories = None
         
 
@@ -1377,11 +1396,11 @@ def build(image_set, args, resolution):
         transforms=None,
         name=image_set,
         include_masks=args.segmentation_head,
-        num_classes=getattr(args, 'num_classes', 2),
-        bg_crop_prob=getattr(args, 'bg_crop_prob', 0.15),
+        # num_classes=getattr(args, 'num_classes', 2),
+        # bg_crop_prob=getattr(args, 'bg_crop_prob', 0.15),
         augment_en=False,
         coco_directories=coco_directories,
-        
+        **args_dict
         # **args_dict
     )
     

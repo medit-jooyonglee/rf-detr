@@ -293,3 +293,9 @@ xray 데이터셋
 * https://www.kaggle.com/datasets/abbasseifossadat/dental-radiography-segmentation
 * https://www.kaggle.com/datasets/imtkaggleteam/dental-opg-xray-dataset
 * https://www.kaggle.com/code/thunderpede/dental-x-rays-caries-segmentation-unet/input?scriptVersionId=135534755&select=labels
+
+
+* 모델 수정
+  * 모델 경량화를 위해 divnov2 모듈 수정
+    * tiny 버전 추가 - dinov2_windowed_tiny 
+* 학습 환경 수정

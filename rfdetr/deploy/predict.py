@@ -40,8 +40,9 @@ from rfdetr.engine import draw_preditions_boxes
 g_rfdetr_model = None
 
 def main():
+    # FIXME: save_path
     from trainer import diskmanager, image_utils
-# 
+    save_dir = f'results/test/0826'
     model = init_and_get_model(export=False)
     
     # model = rf_detr.model.model
@@ -79,8 +80,11 @@ def main():
         # "data/xray_teeth33/test/images/000000.png",]
     from trainer import torch_utils
     # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle/Teeth Segmentation JSON/d2/img/'
+    # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_teeth_seg_kaggle/Teeth Segmentation PNG/d2/img/'
     # path = 'E:/dataset/reverse_tomosynthesis/cbct_ios_dcm'
-    path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON'
+    # path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON'
+    # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm/'
+    path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm/JPEGImages/'
     # path = 
     
     found = diskmanager.deep_search_files(path, exts=['.jpg', '.jpeg'])
@@ -105,7 +109,7 @@ def main():
         
             try:
                 draw_preditions_boxes(
-                    img_tensor, outputs, save=True, save_dir=f'results/test/',
+                    img_tensor, outputs, save=True, save_dir=save_dir,
                 )
             except Exception as e:
                 print(e)
@@ -126,7 +130,7 @@ def init_and_get_model(config=None, device='cuda', export=False):
             patch_size=16,
             num_windows=4,
             # num_queries=100,
-            num_queries=50,
+            num_queries=100,
             group_detr=5,
             num_select=30,
             encoder='dinov2_windowed_tiny',
@@ -142,7 +146,8 @@ def init_and_get_model(config=None, device='cuda', export=False):
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
             # pretrain_weights='e:/temp/checkpoint.pth'
             
-            pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint.pth',
+            pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_0819_all/checkpoint.pth',
+            # 'output/xray_teeth33_dinov2tiny_small_seg_0819_all/eval'
             **config,
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
             
