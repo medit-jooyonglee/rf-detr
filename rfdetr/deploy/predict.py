@@ -80,9 +80,9 @@ def main():
     from trainer import torch_utils
     # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle/Teeth Segmentation JSON/d2/img/'
     # path = 'E:/dataset/reverse_tomosynthesis/cbct_ios_dcm'
-    path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON'
-    # path = 
+    path = 'E:/dataset/reverse_tomosynthesis/cbct_ios_dcm'
     
+    mask_save_dir = 'E:/dataset/reverse_tomosynthesis/cbct_ios_dcm_mask_results_0828'
     found = diskmanager.deep_search_files(path, exts=['.jpg', '.jpeg'])
     # found = glob.glob(f'{path}/*.jpg')
     i_break = 30
@@ -104,9 +104,23 @@ def main():
                 print(outputs['pred_masks'].shape)
         
             try:
-                draw_preditions_boxes(
-                    img_tensor, outputs, save=True, save_dir=f'results/test/',
+                color_image, mask_iamge = draw_preditions_boxes(
+                    img_tensor, outputs, save=False, origin_size=img.shape[:2]
                 )
+                
+                
+                assert len(mask_iamge) == 1, "Expected a single mask image."
+                savename = os.path.join(mask_save_dir, os.path.relpath(file, path))
+                os.makedirs(os.path.dirname(savename), exist_ok=True)
+                # cv2.imwrite(savename, mask_iamge[0].astype(np.uint8))
+                from trainer import image_utils
+                image_utils.cv2_imwrite(savename.replace('.jpg', '.png'), mask_iamge[0].astype(np.uint8))
+                image_utils.cv2_imwrite(savename, color_image[0].astype(np.uint8)[..., ::-1])  # Convert RGB to BGR for saving with OpenCV
+                print(f"Saved mask image to: {savename.replace('.jpg', '.png')}")
+
+            
+            
+            
             except Exception as e:
                 print(e)
                 print('draw_preditions_boxes failed')
@@ -142,7 +156,7 @@ def init_and_get_model(config=None, device='cuda', export=False):
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
             # pretrain_weights='e:/temp/checkpoint.pth'
             
-            pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint.pth',
+            pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_0819/checkpoint.pth',
             **config,
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
             
@@ -356,6 +370,7 @@ def inference_libtorch_model_main():
             continue
         # size = get_size(img.shape[:2], refenrece_width=640, stride=64)
         size = (384, 704)
+        origin_size = img.shape[:2]
         rsz_img = cv2.resize(img, tuple(size[::-1]), interpolation=cv2.INTER_LINEAR)
         rsz_img = np.repeat(rsz_img[None], 3, axis=0).astype(np.float32) / 255.
         tensor = torch_utils.data_convert(rsz_img[None], dtype=dtype)
@@ -379,7 +394,8 @@ def inference_libtorch_model_main():
             res_dicts,
             save=save,
             save_dir='outputs/export/',
-            fname=os.path.relpath(file, path)
+            fname=os.path.relpath(file, path),
+            origin_size=origin_size
         )
         assert len(mask_iamge) == 1, "Expected a single mask image."
         savename = os.path.join(mask_save_dir, os.path.relpath(file, path))

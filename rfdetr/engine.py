@@ -410,7 +410,14 @@ def non_max_suppression(boxes, scores, threshold):
     return np.array(keep, dtype=int)
 
 
-def draw_preditions_boxes(new_samples, outputs, save=False, save_dir='results', nms_refinement=True, fname=''):
+def draw_preditions_boxes(new_samples, outputs, save=False, save_dir='results', nms_refinement=True, fname='', origin_size=None):
+    """Draw predictions, optionally restoring the rendered output to its original size.
+
+    Args:
+        origin_size: Original image size as ``(height, width)``. When provided,
+            the input image, bounding boxes, and segmentation mask are restored
+            from the model input size to this size before rendering.
+    """
     from trainer import torch_utils
     from rfdetr.datasets.teeth import draw_bboxes
     from trainer import utils_numpy, image_utils, time_strftime, vtk_utils
@@ -436,6 +443,13 @@ def draw_preditions_boxes(new_samples, outputs, save=False, save_dir='results', 
     probs = torch_utils.to_numpy(probs.to(torch.float32))
     
     width, height = inputs_arrays.shape[-2:][::-1]
+    render_height, render_width = height, width
+    if origin_size is not None:
+        if len(origin_size) != 2:
+            raise ValueError("origin_size must be a (height, width) pair")
+        render_height, render_width = (int(value) for value in origin_size)
+        if render_height <= 0 or render_width <= 0:
+            raise ValueError("origin_size values must be positive")
     # posit = pred_scores[i] > threshold
     # (batch, num_queries, 4) 
     boxes = denorm_boxes_to_xyxy(boxes, width, height)
@@ -522,6 +536,12 @@ def draw_preditions_boxes(new_samples, outputs, save=False, save_dir='results', 
     for i in range(num_batch):
         
         image = image_utils.to_magnitude_images(images[i])
+        if (render_height, render_width) != (height, width):
+            image = cv2.resize(
+                image,
+                (render_width, render_height),
+                interpolation=cv2.INTER_LINEAR,
+            )
         
         # posit = np.logical_and(label[i] > 0, label[i] < num_classes)
         # posit = pred_scores[i] > threshold
@@ -531,7 +551,10 @@ def draw_preditions_boxes(new_samples, outputs, save=False, save_dir='results', 
         
         posit_boxes = boxes[i]
         posit_labels = label[i]
-        boxes_xy = posit_boxes
+        boxes_xy = posit_boxes.copy()
+        if (render_height, render_width) != (height, width):
+            boxes_xy[..., [0, 2]] *= render_width / width
+            boxes_xy[..., [1, 3]] *= render_height / height
         # boxes_xy = 
         
         
@@ -543,7 +566,11 @@ def draw_preditions_boxes(new_samples, outputs, save=False, save_dir='results', 
             posit_masks = pred_masks_label[i]
             label_image = posit_labels[:, None, None] * posit_masks
             label_image = np.max(label_image, axis=0)
-            restore_label_image = cv2.resize(label_image, (width, height), interpolation=cv2.INTER_NEAREST)
+            restore_label_image = cv2.resize(
+                label_image,
+                (render_width, render_height),
+                interpolation=cv2.INTER_NEAREST,
+            )
             mask_images.append(restore_label_image)
             color_label_image = colors[restore_label_image]
             # image_utils.
@@ -561,4 +588,3 @@ def draw_preditions_boxes(new_samples, outputs, save=False, save_dir='results', 
             image_utils.cv2_imwrite(save_name, image.astype(np.uint8)[..., ::-1])
             print("Saved image with bounding boxes to: ", save_name)
     return res_images, mask_images
-        
