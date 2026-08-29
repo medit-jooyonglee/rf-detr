@@ -22,7 +22,7 @@ import os
 import sys
 from typing import Iterable
 import random
-
+import time
 import torch
 import torch.nn.functional as F
 
@@ -551,6 +551,8 @@ def draw_preditions_boxes(new_samples, outputs, save=False, save_dir='results', 
         res_images.append(image)
 
         if save:
+            # save_dir = 
+            save_dir = os.path.join(save_dir, time.strftime('%Y%m%d'))
             if fname:
                 save_name = os.path.join(save_dir, fname)
             else:

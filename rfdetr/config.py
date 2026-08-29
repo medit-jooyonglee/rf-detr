@@ -170,5 +170,9 @@ class SegmentationTrainConfig(TrainConfig):
     mask_point_sample_ratio: int = 16
     mask_ce_loss_coef: float = 5.0
     mask_dice_loss_coef: float = 5.0
+    # extra weight on an additional BCE term restricted to pixels near the GT mask boundary.
+    # helps on low edge-contrast cases (e.g. metal/prosthetic artifacts) where the plain
+    # dice/ce losses are dominated by the easy interior pixels.
+    mask_boundary_loss_coef: float = 2.0
     cls_loss_coef: float = 5.0
     segmentation_head: bool = True

@@ -423,8 +423,8 @@ def create_albu_transform(max_rotate_degree=8, **params):
             p=1.0
         )
         ], 
-        bbox_params=A.BboxParams(format='pascal_voc'),
-        keypoint_params=A.KeypointParams(format='xy', )
+        bbox_params=A.BboxParams(format='pascal_voc', label_fields=['bbox_indices']),
+        keypoint_params=A.KeypointParams(format='xy', remove_invisible=False)
     )
     
 class XrayPnoaramicInstance(XrayPnoramic):
@@ -660,9 +660,18 @@ class XrayPnoaramicInstance(XrayPnoramic):
             color: 채울 색상
             """
             # OpenCV는 좌표를 (N, 1, 2) 형태의 int32 배열로 요구합니다.
-            pts = np.array(polygons, dtype=np.int32).reshape((-1, 1, 2))
+            points = np.asarray(polygons)
+            if image.size == 0 or points.size < 6:
+                return image
+
+            points = points.reshape(-1, 2)
+            points = points[np.isfinite(points).all(axis=1)]
+            if points.shape[0] < 3:
+                return image
+
+            pts = np.ascontiguousarray(points, dtype=np.int32).reshape((-1, 1, 2))
             if scale is not None:
-                pts = (pts * scale).astype(np.int32)
+                pts = np.ascontiguousarray(pts * scale, dtype=np.int32)
             # if image.ndim == 3:
                 
             # 내부 채우기 (이미지 자체에 수정이 가해짐)
@@ -689,7 +698,8 @@ class XrayPnoaramicInstance(XrayPnoramic):
             min_size = np.array([1/25, 1/6])
             
             size = np.random.uniform(min_size, min_size * 1.5, size=(num_gen, 2))
-            bmax = bmin + size
+            # clamp so bmax never exceeds 1.0 (out-of-bounds boxes crash albumentations validation)
+            bmax = np.minimum(bmin + size, 1.0)
             bboxes = np.concatenate([bmin * shape, bmax* shape], axis=-1).astype(np.int64)
             class_labels = np.zeros([  num_gen], dtype=np.int64)
             # pass
@@ -725,6 +735,30 @@ class XrayPnoaramicInstance(XrayPnoramic):
         scale_wh = np.array(cv_size) / np.array(src.shape[::-1])
         
         rsz_bboxes = (bboxes.reshape([-1, 2]) * scale_wh).reshape(bboxes.shape)
+
+        # Clipping an annotation that lies completely outside the image can
+        # collapse it to a zero-area box (for example y_min == y_max == 0).
+        # Albumentations validates boxes before applying transforms and rejects
+        # such boxes, so remove them together with their associated metadata.
+        img_h, img_w = src_rsz.shape[:2]
+        if rsz_bboxes.shape[0] > 0:
+            rsz_bboxes[:, [0, 2]] = np.clip(rsz_bboxes[:, [0, 2]], 0, img_w)
+            rsz_bboxes[:, [1, 3]] = np.clip(rsz_bboxes[:, [1, 3]], 0, img_h)
+            valid_boxes = (
+                np.isfinite(rsz_bboxes).all(axis=1)
+                & (rsz_bboxes[:, 2] > rsz_bboxes[:, 0])
+                & (rsz_bboxes[:, 3] > rsz_bboxes[:, 1])
+            )
+            if not valid_boxes.all():
+                rsz_bboxes = rsz_bboxes[valid_boxes]
+                bboxes = bboxes[valid_boxes]
+                class_labels = class_labels[valid_boxes]
+                if len(annot_data) == len(valid_boxes):
+                    annot_data = [
+                        annot for annot, valid in zip(annot_data, valid_boxes)
+                        if valid
+                    ]
+
         # rsz_polygons = 
         if self.include_masks:
             polygons = [annot['segmentation'] for annot in annot_data]
@@ -740,26 +774,41 @@ class XrayPnoaramicInstance(XrayPnoramic):
             polygons_indices = None
         
         # rsz_bboxes_labels = np.concatenate([rsz_bboxes, np.zeros([rsz_bboxes.shape[0], 1])], axis=-1)
+        kept_bbox_indices = np.arange(rsz_bboxes.shape[0], dtype=np.int64)
         if self.name == 'train' and self.augment_en:
             transformed = self.albu_transform(
                 image=src_rsz, 
                 bboxes=rsz_bboxes, 
+                bbox_indices=kept_bbox_indices,
                 # class_labels=class_labels,
                 keypoints=rsz_polygons,
                 polygons_indices=polygons_indices,
             )
             
             src_rsz = transformed['image']
-            rsz_bboxes = transformed['bboxes']
+            rsz_bboxes = np.asarray(transformed['bboxes'], dtype=np.float32).reshape(-1, 4)
+            kept_bbox_indices = np.asarray(
+                transformed['bbox_indices'], dtype=np.int64
+            )
+            bboxes = bboxes[kept_bbox_indices]
+            class_labels = class_labels[kept_bbox_indices]
             trans_rsz_polygons = transformed['keypoints']
         else:
             trans_rsz_polygons = rsz_polygons
-            
-        rsz_polygons = []
-        start = 0
-        for size in polygons_indices:
-            rsz_polygons.append(trans_rsz_polygons[start:start+size])
-            start += size
+
+        if polygons_indices is not None:
+            all_rsz_polygons = []
+            start = 0
+            for size in polygons_indices:
+                all_rsz_polygons.append(trans_rsz_polygons[start:start+size])
+                start += size
+            rsz_polygons = [
+                all_rsz_polygons[i]
+                for i in kept_bbox_indices
+                if i < len(all_rsz_polygons)
+            ]
+        else:
+            rsz_polygons = None
         
             
             
@@ -925,14 +974,15 @@ class XrayPnoaramicInstance(XrayPnoramic):
             relative_filename = os.path.relpath(filename, base_dir)
             # annotation_id = 1
             image, target = item
+            # image is CHW; shape[1:] == (H, W)
             height, width = image.shape[1:]
             image_id = i
             # for image_id, img in enumerate(custom_dataset, 1):?
             images.append({
                 "id": image_id,
                 "file_name": relative_filename,
-                "width": height,
-                "height": width,
+                "width": width,
+                "height": height,
 
             })
             keys = ['boxes', 'labels', 'area', 'is_crowd', 'segmentation']
@@ -1257,7 +1307,8 @@ def test_load_coco_dataset():
         name='train',
                 coco_directories=[
             # ('E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm', 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm/annotations.json')
-            ('/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm/', '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm/annotations.json')
+            ('/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm/',
+             '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm/annotations.json')
         ],
         # splits={
             # 'train': (0, 0.)
@@ -1398,7 +1449,7 @@ def build(image_set, args, resolution):
         include_masks=args.segmentation_head,
         # num_classes=getattr(args, 'num_classes', 2),
         # bg_crop_prob=getattr(args, 'bg_crop_prob', 0.15),
-        augment_en=False,
+        augment_en=(image_set == 'train'),
         coco_directories=coco_directories,
         **args_dict
         # **args_dict

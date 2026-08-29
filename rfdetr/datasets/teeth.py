@@ -228,14 +228,15 @@ class TeethDetection(CocoDetection):
             relative_filename = os.path.relpath(filename, base_dir)
             # annotation_id = 1
             image, target = item
+            # image is CHW; shape[1:] == (H, W)
             height, width = image.shape[1:]
             image_id = i
             # for image_id, img in enumerate(custom_dataset, 1):?
             images.append({
                 "id": image_id,
                 "file_name": relative_filename,
-                "width": height,
-                "height": width,
+                "width": width,
+                "height": height,
 
             })
             keys = ['boxes', 'labels', 'area', 'is_crowd']

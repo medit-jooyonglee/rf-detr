@@ -42,7 +42,7 @@ g_rfdetr_model = None
 def main():
     # FIXME: save_path
     from trainer import diskmanager, image_utils
-    save_dir = f'results/test/0826'
+    save_dir = f'results/test/0828'
     model = init_and_get_model(export=False)
     
     # model = rf_detr.model.model
@@ -84,7 +84,7 @@ def main():
     # path = 'E:/dataset/reverse_tomosynthesis/cbct_ios_dcm'
     # path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON'
     # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm/'
-    path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm/JPEGImages/'
+    path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_0824/'
     # path = 
     
     found = diskmanager.deep_search_files(path, exts=['.jpg', '.jpeg'])
@@ -146,7 +146,8 @@ def init_and_get_model(config=None, device='cuda', export=False):
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
             # pretrain_weights='e:/temp/checkpoint.pth'
             
-            pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_0819_all/checkpoint.pth',
+            # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_0819_all/checkpoint.pth',
+            pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_aug_retrain/checkpoint.pth',
             # 'output/xray_teeth33_dinov2tiny_small_seg_0819_all/eval'
             **config,
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'

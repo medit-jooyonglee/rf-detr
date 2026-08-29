@@ -465,6 +465,7 @@ class SetCriterion(nn.Module):
             return {
                 'loss_mask_ce': src_masks.sum(),
                 'loss_mask_dice': src_masks.sum(),
+                'loss_mask_boundary': src_masks.sum(),
             }
         # gather matched target masks
         target_masks = torch.cat([t['masks'][j] for t, (_, j) in zip(targets, indices)], dim=0)  # [N, Ht, Wt]
@@ -503,6 +504,25 @@ class SetCriterion(nn.Module):
             "loss_mask_ce": sigmoid_ce_loss_jit(point_logits, point_labels, num_boxes),
             "loss_mask_dice": dice_loss_jit(point_logits, point_labels, num_boxes),
         }
+
+        # Boundary-aware term: pixels whose local neighborhood contains both fg/bg
+        # (i.e. near the GT contour) get up-weighted in a BCE loss. This targets
+        # low edge-contrast cases (metal/prosthetic artifacts) where the interior
+        # of the mask is easy but the boundary is ambiguous and otherwise
+        # under-supervised relative to the large flat interior region.
+        with torch.no_grad():
+            dilated = F.max_pool2d(target_masks, kernel_size=5, stride=1, padding=2)
+            eroded = -F.max_pool2d(-target_masks, kernel_size=5, stride=1, padding=2)
+            boundary_map = (dilated - eroded).clamp(0, 1)
+            boundary_weight = point_sample(
+                boundary_map,
+                point_coords,
+                align_corners=False,
+            ).squeeze(1)
+
+        bce = F.binary_cross_entropy_with_logits(point_logits, point_labels, reduction="none")
+        loss_mask_boundary = (bce * (1.0 + 4.0 * boundary_weight)).sum(-1).mean() / num_boxes
+        losses["loss_mask_boundary"] = loss_mask_boundary
 
         del src_masks
         del target_masks
@@ -843,6 +863,7 @@ def build_criterion_and_postprocessors(args):
     if args.segmentation_head:
         weight_dict['loss_mask_ce'] = args.mask_ce_loss_coef
         weight_dict['loss_mask_dice'] = args.mask_dice_loss_coef
+        weight_dict['loss_mask_boundary'] = getattr(args, 'mask_boundary_loss_coef', 2.0)
     # TODO this is a hack
     if args.aux_loss:
         aux_weight_dict = {}

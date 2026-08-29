@@ -343,7 +343,7 @@ class MaskawareImageAug(DualTransform):
         mask = np.zeros(img.shape[:2], dtype=np.uint8)
         for i0 in arg:
             poly = split_polys[i0]
-            cv2.fillPoly(mask, [poly.astype(np.int32)], color=np.random.randint(1, 3))
+            cv2.fillPoly(mask, [poly.astype(np.int32)], color=255)
             
         
         # kernel_size = max(3, self.border_thickness * 2 + 1)
@@ -352,9 +352,28 @@ class MaskawareImageAug(DualTransform):
         
         # 원본 마스크에서 안쪽으로 침식된 마스크 생성
         eroded_mask = cv2.erode(mask, kernel, iterations=np.random.randint(1, 4))
-        
-        eroded_mask = eroded_mask[..., None] 
-        return np.where(eroded_mask, np.clip(img + eroded_mask * np.random.uniform(60, 255), 0, 255), img).astype(img.dtype)
+
+        # feather(블러) 처리하여 하드-엣지 대신 주변 조직으로 서서히 번지는
+        # 밝기 증가를 만든다 -> 금속/보철 아티팩트에서 흔히 보이는
+        # "경계가 불분명한(edge가 washed-out)" 외형을 모사한다.
+        feather_ksize = int(np.random.choice([9, 15, 21]))
+        feather_mask = cv2.GaussianBlur(
+            eroded_mask.astype(np.float32), (feather_ksize, feather_ksize), 0
+        ) / 255.0
+        feather_mask = feather_mask[..., None]
+
+        brightness_inc = np.random.uniform(60, 255)
+        img_f = img.astype(np.float32)
+        brightened = np.clip(img_f + brightness_inc, 0, 255)
+
+        # 아티팩트 영역 자체도 블러 처리해서 치아 경계의 대비를 낮춘다.
+        blur_ksize = int(np.random.choice([5, 9, 13]))
+        blurred = cv2.GaussianBlur(brightened, (blur_ksize, blur_ksize), 0)
+        if blurred.ndim < img_f.ndim:
+            blurred = blurred[..., None]
+
+        out = img_f * (1 - feather_mask) + blurred * feather_mask
+        return np.clip(out, 0, 255).astype(img.dtype)
         
 
     def apply_to_bboxes(self, bboxes, **params):

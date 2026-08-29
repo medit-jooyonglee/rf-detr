@@ -191,7 +191,7 @@ def train_from_xray_teeth_dir():
         # num_classes=32,
         num_classes=num_classes,
         segmentation_head=args.segmentation_head,
-        pretrain_weights="output/xray_teeth33_dinov2tiny_small_seg_0819_all/checkpoint.pth",
+        pretrain_weights="output/xray_teeth33_dinov2tiny_small_seg_aug_retrain/checkpoint.pth",
         # pretrain_weights="output/xray_teeth/checkpoint0059.pth",
         # pretrain_weights='output/xray_teeth33/checkpoint0039.pth'
         # pretrain_weights='output/xray_teeth33/checkpoint_best_regular.pth'
@@ -213,7 +213,7 @@ def train_from_xray_teeth_dir():
     rf_detr.train(
         dataset_dir=dataset_dir,
         coco_directories=coco_directories,
-        epochs=800,
+        epochs=250,
         device="cuda" if device_supports_cuda else "cpu",
         dataset_file='xray_teeth',
         # coco_path=teeth_dir,
@@ -229,8 +229,8 @@ def train_from_xray_teeth_dir():
         multi_scale=False,
         num_queries=50,
         num_select=35,
-        checkpoint_interval = 50,
-        output_dir='output/xray_teeth33_dinov2tiny_small_seg_0819_all',
+        checkpoint_interval = 30,
+        output_dir='output/xray_teeth33_dinov2tiny_small_seg_aug_retrain',
         # annot_file='../../xray_coco_33.json',
         # annot_file='../../xray_coco_33.json',
         annot_file=annot_file,
