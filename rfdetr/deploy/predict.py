@@ -153,6 +153,7 @@ def init_and_get_model(config=None, device='cuda', export=False, use_ema=True):
             
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_0819_all/checkpoint.pth',
             pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_crop_retrain/checkpoint.pth',
+            # 'output/xray_teeth33_dinov2tiny_small_seg_crop_retrain'
             # 'output/xray_teeth33_dinov2tiny_small_seg_0819_all/eval'
             **config,
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
