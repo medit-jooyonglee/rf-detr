@@ -278,6 +278,15 @@ class XrayPnoramic(Dataset):
             #  = rsz_target
             src, target = rsz_src, rsz_target
             # return rsz_src, rsz_target
+
+            # Match the RF-DETR target contract used by the JSON datasets:
+            # normalized (cx, cy, width, height), not absolute xyxy pixels.
+            boxes_xyxy = np.asarray(target['boxes'], dtype=np.float32).reshape(-1, 4)
+            norm_xyxy = boxes_xyxy / np.array(
+                [target_rsz_img[1], target_rsz_img[0]] * 2,
+                dtype=np.float32,
+            )
+            target['boxes'] = xyxy_xcycwh(norm_xyxy)
         else:
             # c h, w 
             src = np.transpose(src, [2, 0, 1]) if src.ndim == 3 else src[None, ...]

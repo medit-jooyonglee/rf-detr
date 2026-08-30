@@ -10,6 +10,155 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Callable
 
+def scale_coarse_probability_hint(
+    coarse_probability: torch.Tensor,
+    scale: float = 0.35,
+) -> torch.Tensor:
+    """Center [0,1] probabilities at zero and limit their refinement strength."""
+    if not 0.0 <= scale <= 1.0:
+        raise ValueError("coarse_hint_scale must be between 0 and 1.")
+    return (2.0 * coarse_probability - 1.0) * scale
+
+
+def _crop_grid(boxes: torch.Tensor, output_size: tuple[int, int]) -> torch.Tensor:
+    """Build a grid_sample grid for normalized cxcywh boxes."""
+    crop_h, crop_w = output_size
+    boxes = boxes.clamp(0.0, 1.0)
+    cx, cy, bw, bh = boxes.unbind(-1)
+    bw = bw.clamp_min(1e-6)
+    bh = bh.clamp_min(1e-6)
+
+    ys = (torch.arange(crop_h, device=boxes.device, dtype=boxes.dtype) + 0.5) / crop_h
+    xs = (torch.arange(crop_w, device=boxes.device, dtype=boxes.dtype) + 0.5) / crop_w
+    grid_y, grid_x = torch.meshgrid(ys, xs, indexing='ij')
+
+    x0 = cx - 0.5 * bw
+    y0 = cy - 0.5 * bh
+    sample_x = x0[..., None, None] + grid_x * bw[..., None, None]
+    sample_y = y0[..., None, None] + grid_y * bh[..., None, None]
+    grid = torch.stack((sample_x, sample_y), dim=-1)
+    return grid.mul(2.0).sub(1.0)
+
+
+def crop_tensor_by_boxes(
+    tensor: torch.Tensor,
+    boxes: torch.Tensor,
+    output_size: tuple[int, int] = (128, 64),
+) -> torch.Tensor:
+    """Crop BxCxHxW tensors with BxNx4 normalized cxcywh boxes."""
+    if tensor.ndim != 4 or boxes.ndim != 3:
+        raise ValueError("Expected tensor [B,C,H,W] and boxes [B,N,4].")
+    batch_size, channels = tensor.shape[:2]
+    if boxes.shape[0] != batch_size:
+        raise ValueError("Tensor and boxes batch dimensions must match.")
+
+    num_boxes = boxes.shape[1]
+    crop_h, crop_w = output_size
+    if num_boxes == 0:
+        return tensor.new_empty((batch_size, 0, channels, crop_h, crop_w))
+
+    source = tensor[:, None].expand(-1, num_boxes, -1, -1, -1)
+    source = source.reshape(batch_size * num_boxes, channels, *tensor.shape[-2:])
+    grid = _crop_grid(boxes, output_size).reshape(
+        batch_size * num_boxes, crop_h, crop_w, 2
+    )
+    crops = F.grid_sample(
+        source,
+        grid,
+        mode='bilinear',
+        padding_mode='zeros',
+        align_corners=False,
+    )
+    return crops.reshape(batch_size, num_boxes, channels, crop_h, crop_w)
+
+
+def crop_instance_masks(
+    masks: torch.Tensor,
+    boxes: torch.Tensor,
+    output_size: tuple[int, int] = (128, 64),
+) -> torch.Tensor:
+    """Crop each NxHxW instance mask with its corresponding Nx4 box."""
+    if masks.shape[0] == 0:
+        return masks.new_empty((0, *output_size), dtype=torch.float32)
+    crops = crop_tensor_by_boxes(
+        masks[:, None].float(),
+        boxes[:, None].detach(),
+        output_size,
+    )
+    return crops[:, 0, 0]
+
+
+def paste_masks_in_image(
+    masks: torch.Tensor,
+    boxes_xyxy: torch.Tensor,
+    image_size: tuple[int, int],
+) -> torch.Tensor:
+    """Paste K ROI mask logits into K full-image canvases."""
+    image_h, image_w = image_size
+    pasted = masks.new_zeros((masks.shape[0], image_h, image_w))
+    for index, (mask, box) in enumerate(zip(masks, boxes_xyxy)):
+        x0 = max(int(torch.floor(box[0]).item()), 0)
+        y0 = max(int(torch.floor(box[1]).item()), 0)
+        x1 = min(int(torch.ceil(box[2]).item()), image_w)
+        y1 = min(int(torch.ceil(box[3]).item()), image_h)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        resized = F.interpolate(
+            mask[None, None],
+            size=(y1 - y0, x1 - x0),
+            mode='bilinear',
+            align_corners=False,
+        )[0, 0]
+        pasted[index, y0:y1, x0:x1] = resized
+    return pasted
+
+
+class _CropConvBlock(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+        groups = min(8, out_channels)
+        self.block = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 3, padding=1, bias=False),
+            nn.GroupNorm(groups, out_channels),
+            nn.GELU(),
+            nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False),
+            nn.GroupNorm(groups, out_channels),
+            nn.GELU(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.block(x)
+
+
+class CropAndResizeSegmentationHead(nn.Module):
+    """Binary U-Net refining image ROIs with coarse mask probabilities."""
+
+    def __init__(self, output_size: tuple[int, int] = (128, 64), in_channels: int = 4):
+        super().__init__()
+        self.output_size = tuple(output_size)
+        if min(self.output_size) < 4:
+            raise ValueError(
+                "Crop segmentation height and width must both be at least 4."
+            )
+        self.enc1 = _CropConvBlock(in_channels, 32)
+        self.enc2 = _CropConvBlock(32, 64)
+        self.bottleneck = _CropConvBlock(64, 128)
+        self.dec2 = _CropConvBlock(128 + 64, 64)
+        self.dec1 = _CropConvBlock(64 + 32, 32)
+        self.mask_logits = nn.Conv2d(32, 1, kernel_size=1)
+
+    def forward(self, crops: torch.Tensor) -> torch.Tensor:
+        if crops.shape[0] == 0:
+            return crops.new_empty((0, *self.output_size))
+        enc1 = self.enc1(crops)
+        enc2 = self.enc2(F.max_pool2d(enc1, 2))
+        bottleneck = self.bottleneck(F.max_pool2d(enc2, 2))
+        dec2 = F.interpolate(bottleneck, size=enc2.shape[-2:], mode='bilinear', align_corners=False)
+        dec2 = self.dec2(torch.cat((dec2, enc2), dim=1))
+        dec1 = F.interpolate(dec2, size=enc1.shape[-2:], mode='bilinear', align_corners=False)
+        dec1 = self.dec1(torch.cat((dec1, enc1), dim=1))
+        return self.mask_logits(dec1)[:, 0]
+
 
 class DepthwiseConvBlock(nn.Module):
     r""" Simplified ConvNeXt block without the MLP subnet

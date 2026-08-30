@@ -155,7 +155,10 @@ class Model:
             )
             self.model.backbone[0].encoder = get_peft_model(self.model.backbone[0].encoder, lora_config)
         self.model = self.model.to(self.device)
-        self.postprocess = PostProcess(num_select=args.num_select)
+        self.postprocess = PostProcess(
+            num_select=args.num_select,
+            segmentation_mode=getattr(args, 'segmentation_mode', 'full_image'),
+        )
         self.stop_early = False
     
     def reinitialize_detection_head(self, num_classes):

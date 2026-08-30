@@ -17,6 +17,7 @@ import numpy as np
 from PIL import Image
 
 import rfdetr.util.misc as utils
+from rfdetr.util.utils import clean_state_dict
 import rfdetr.datasets.transforms as T
 from rfdetr.models import build_model
 # from rfdetr.deploy._onnx import OnnxOptimizer
@@ -38,12 +39,13 @@ from rfdetr.config import (
 from rfdetr.engine import draw_preditions_boxes
 
 g_rfdetr_model = None
+MASK_PROBABILITY_THRESHOLD = 0.6
 
-def main():
+def main(use_ema=True):
     # FIXME: save_path
     from trainer import diskmanager, image_utils
     save_dir = f'results/test/0828'
-    model = init_and_get_model(export=False)
+    model = init_and_get_model(export=False, use_ema=use_ema)
     
     # model = rf_detr.model.model
     
@@ -76,15 +78,13 @@ def main():
         # next(rf_detr.model.model.parameters()).device
     # model = rf_detr.model.model
     # model.eval()
-    model = init_and_get_model()
-        # "data/xray_teeth33/test/images/000000.png",]
     from trainer import torch_utils
     # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle/Teeth Segmentation JSON/d2/img/'
     # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_teeth_seg_kaggle/Teeth Segmentation PNG/d2/img/'
     # path = 'E:/dataset/reverse_tomosynthesis/cbct_ios_dcm'
     # path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON'
     # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm/'
-    path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_0824/'
+    path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_0824/JPEGImages/'
     # path = 
     
     found = diskmanager.deep_search_files(path, exts=['.jpg', '.jpeg'])
@@ -110,6 +110,8 @@ def main():
             try:
                 draw_preditions_boxes(
                     img_tensor, outputs, save=True, save_dir=save_dir,
+                    segmentation_mode='crop_and_resize',
+                    mask_probability_threshold=MASK_PROBABILITY_THRESHOLD,
                 )
             except Exception as e:
                 print(e)
@@ -121,7 +123,7 @@ def main():
     print(model)
     
 
-def init_and_get_model(config=None, device='cuda', export=False):
+def init_and_get_model(config=None, device='cuda', export=False, use_ema=True):
     global g_rfdetr_model
     config = config or dict()
     if g_rfdetr_model is None:
@@ -142,17 +144,41 @@ def init_and_get_model(config=None, device='cuda', export=False):
             # num_classes=32,
             num_classes=32,
             segmentation_head=True,
+            segmentation_mode='crop_and_resize',
+            segmentation_crop_size=(128, 64),
+            coarse_hint_scale=0.35,
 
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
             # pretrain_weights='e:/temp/checkpoint.pth'
             
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_0819_all/checkpoint.pth',
-            pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_aug_retrain/checkpoint.pth',
+            pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_crop_retrain/checkpoint.pth',
             # 'output/xray_teeth33_dinov2tiny_small_seg_0819_all/eval'
             **config,
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
             
         )
+
+        if use_ema:
+            checkpoint_path = rf_detr.model.args.pretrain_weights
+            checkpoint = torch.load(
+                checkpoint_path,
+                map_location='cpu',
+                weights_only=False,
+            )
+            ema_state_dict = checkpoint.get('ema_model')
+            if ema_state_dict is None:
+                print(
+                    f"EMA weights not found in {checkpoint_path}; "
+                    "using regular model weights."
+                )
+            else:
+                rf_detr.model.model.load_state_dict(
+                    clean_state_dict(ema_state_dict),
+                    strict=True,
+                )
+                print(f'Loaded EMA weights from: {checkpoint_path}')
+
         # g_rfdetr_model = rf_detr.model.model
         # g_rfdetr_model.eval()
         # g_rfdetr_model.cuda()
@@ -398,7 +424,15 @@ def inference_libtorch_model_main():
 
     
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description='RF-DETR tooth segmentation inference')
+    parser.add_argument(
+        '--use-ema',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='Use ema_model weights from the checkpoint (default: enabled).',
+    )
+    cli_args = parser.parse_args()
+    main(use_ema=cli_args.use_ema)
     # export_libtorch('outputs/temp.pt')
     # coreml_export_main()
     # test_coreml_inference()
