@@ -9,8 +9,9 @@
             "request": "launch",
             "program": "${file}", // 현재 열려있는 파일을 실행
             "console": "integratedTerminal",
+            "justMyCode": false,
             "args": [
-                "--eval"
+                // "--eval"
 
             ]
         },

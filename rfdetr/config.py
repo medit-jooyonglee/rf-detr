@@ -6,7 +6,7 @@
 
 
 from pydantic import BaseModel
-from typing import List, Optional, Literal, Type, Union
+from typing import List, Optional, Literal, Tuple, Type, Union
 import torch
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
@@ -37,6 +37,9 @@ class ModelConfig(BaseModel):
     cls_loss_coef: float = 1.0
     segmentation_head: bool = False
     mask_downsample_ratio: int = 4
+    segmentation_mode: Literal["full_image", "crop_and_resize"] = "full_image"
+    segmentation_crop_size: Tuple[int, int] = (128, 64)
+    coarse_hint_scale: float = 0.35
     
     # dino-v2 antialias option
     antialias: bool = True
@@ -164,11 +167,18 @@ class TrainConfig(BaseModel):
     class_names: List[str] = None
     run_test: bool = True
     segmentation_head: bool = False
+    segmentation_mode: Literal["full_image", "crop_and_resize"] = "full_image"
+    segmentation_crop_size: Tuple[int, int] = (128, 64)
+    coarse_hint_scale: float = 0.35
 
 
 class SegmentationTrainConfig(TrainConfig):
     mask_point_sample_ratio: int = 16
     mask_ce_loss_coef: float = 5.0
     mask_dice_loss_coef: float = 5.0
+    # extra weight on an additional BCE term restricted to pixels near the GT mask boundary.
+    # helps on low edge-contrast cases (e.g. metal/prosthetic artifacts) where the plain
+    # dice/ce losses are dominated by the easy interior pixels.
+    mask_boundary_loss_coef: float = 2.0
     cls_loss_coef: float = 5.0
     segmentation_head: bool = True

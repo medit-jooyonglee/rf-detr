@@ -85,11 +85,12 @@ class HungarianMatcher(nn.Module):
         tgt_ids = torch.cat([v["labels"] for v in targets])
         tgt_bbox = torch.cat([v["boxes"] for v in targets])
 
-        masks_present = "masks" in targets[0]
+        mask_key = "pred_masks_coarse" if "pred_masks_coarse" in outputs else "pred_masks"
+        masks_present = "masks" in targets[0] and mask_key in outputs
 
         if masks_present:
             tgt_masks = torch.cat([v["masks"] for v in targets])
-            out_masks = outputs["pred_masks"].flatten(0, 1)
+            out_masks = outputs[mask_key].flatten(0, 1)
 
         # Compute the giou cost betwen boxes
         giou = generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))

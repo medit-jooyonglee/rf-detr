@@ -22,7 +22,7 @@ import os
 import sys
 from typing import Iterable
 import random
-
+import time
 import torch
 import torch.nn.functional as F
 
@@ -410,7 +410,16 @@ def non_max_suppression(boxes, scores, threshold):
     return np.array(keep, dtype=int)
 
 
-def draw_preditions_boxes(new_samples, outputs, save=False, save_dir='results', nms_refinement=True, fname='', origin_size=None):
+def draw_preditions_boxes(
+    new_samples,
+    outputs,
+    save=False,
+    save_dir='results',
+    nms_refinement=True,
+    fname='', origin_size=None,
+    segmentation_mode='full_image',
+    mask_probability_threshold=0.5,
+):
     """Draw predictions, optionally restoring the rendered output to its original size.
 
     Args:
@@ -459,8 +468,36 @@ def draw_preditions_boxes(new_samples, outputs, save=False, save_dir='results', 
     
     pred_masks = outputs.get('pred_masks')
     if pred_masks is not None:
-        pred_masks = F.interpolate(pred_masks, size=inputs_arrays.shape[-2:], mode='bilinear', align_corners=False)
-        pred_masks_label = torch_utils.to_numpy(pred_masks > 0)
+        if segmentation_mode == 'crop_and_resize':
+            from rfdetr.models.segmentation_head import paste_masks_in_image
+            pasted_masks = []
+            for batch_index in range(pred_masks.shape[0]):
+                pasted_masks.append(
+                    paste_masks_in_image(
+                        pred_masks[batch_index],
+                        torch.as_tensor(
+                            boxes[batch_index],
+                            device=pred_masks.device,
+                        ),
+                        tuple(inputs_arrays.shape[-2:]),
+                    )
+                )
+            pred_masks = torch.stack(pasted_masks)
+        else:
+            pred_masks = F.interpolate(
+                pred_masks,
+                size=inputs_arrays.shape[-2:],
+                mode='bilinear',
+                align_corners=False,
+            )
+        if not 0.0 < mask_probability_threshold < 1.0:
+            raise ValueError("mask_probability_threshold must be between 0 and 1.")
+        mask_logit_threshold = math.log(
+            mask_probability_threshold / (1.0 - mask_probability_threshold)
+        )
+        pred_masks_label = torch_utils.to_numpy(
+            pred_masks > mask_logit_threshold
+        )
     else:
         pred_masks_label = None
     confidence_threshold = 0.5
@@ -578,6 +615,8 @@ def draw_preditions_boxes(new_samples, outputs, save=False, save_dir='results', 
         res_images.append(image)
 
         if save:
+            # save_dir = 
+            save_dir = os.path.join(save_dir, time.strftime('%Y%m%d'))
             if fname:
                 save_name = os.path.join(save_dir, fname)
             else:

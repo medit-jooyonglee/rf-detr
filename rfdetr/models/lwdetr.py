@@ -35,7 +35,16 @@ from rfdetr.util.misc import (NestedTensor, nested_tensor_from_tensor_list,
 from rfdetr.models.backbone import build_backbone
 from rfdetr.models.matcher import build_matcher
 from rfdetr.models.transformer import build_transformer
-from rfdetr.models.segmentation_head import SegmentationHead, get_uncertain_point_coords_with_randomness, point_sample
+from rfdetr.models.segmentation_head import (
+    CropAndResizeSegmentationHead,
+    SegmentationHead,
+    crop_instance_masks,
+    crop_tensor_by_boxes,
+    get_uncertain_point_coords_with_randomness,
+    paste_masks_in_image,
+    point_sample,
+    scale_coarse_probability_hint,
+)
 
 class LWDETR(nn.Module):
     """ This is the Group DETR v3 module that performs object detection """
@@ -43,13 +52,17 @@ class LWDETR(nn.Module):
                  backbone,
                  transformer,
                  segmentation_head,
+                 segmentation_refinement_head,
                  num_classes,
                  num_queries,
                  aux_loss=False,
                  group_detr=1,
                  two_stage=False,
                  lite_refpoint_refine=False,
-                 bbox_reparam=False):
+                 bbox_reparam=False,
+                 segmentation_mode='full_image',
+                 segmentation_crop_size=(128, 64),
+                 coarse_hint_scale=0.35):
         """ Initializes the model.
         Parameters:
             backbone: torch module of the backbone to be used. See backbone.py
@@ -67,7 +80,11 @@ class LWDETR(nn.Module):
         hidden_dim = transformer.d_model
         self.class_embed = nn.Linear(hidden_dim, num_classes)
         self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
+        self.segmentation_mode = segmentation_mode
+        self.segmentation_crop_size = tuple(segmentation_crop_size)
+        self.coarse_hint_scale = float(coarse_hint_scale)
         self.segmentation_head = segmentation_head
+        self.segmentation_refinement_head = segmentation_refinement_head
         
         query_dim=4
         self.refpoint_embed = nn.Embedding(num_queries * group_detr, query_dim)
@@ -120,6 +137,93 @@ class LWDETR(nn.Module):
                 enc_out_class_embed.weight.data = enc_out_class_embed.weight.data[:num_classes]
                 enc_out_class_embed.bias.data = enc_out_class_embed.bias.data.repeat(num_repeats)
                 enc_out_class_embed.bias.data = enc_out_class_embed.bias.data[:num_classes]
+
+    def _predict_crop_masks(
+        self,
+        images: torch.Tensor,
+        boxes: torch.Tensor,
+        coarse_masks: torch.Tensor,
+        padding_masks: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        logits_per_image = []
+        for batch_index, (image, image_boxes, image_coarse_masks) in enumerate(
+            zip(images, boxes, coarse_masks)
+        ):
+            if padding_masks is not None:
+                valid = ~padding_masks[batch_index]
+                valid_h = int(valid.any(dim=1).sum().item())
+                valid_w = int(valid.any(dim=0).sum().item())
+                image = image[:, :valid_h, :valid_w]
+            image_boxes = image_boxes.detach().clamp(0.0, 1.0)
+            image_crops = crop_tensor_by_boxes(
+                image[None],
+                image_boxes[None],
+                self.segmentation_crop_size,
+            )[0]
+            probability_crops = crop_instance_masks(
+                image_coarse_masks.sigmoid(),
+                image_boxes,
+                self.segmentation_crop_size,
+            )[:, None]
+            probability_crops = scale_coarse_probability_hint(
+                probability_crops, self.coarse_hint_scale
+            )
+            refinement_input = torch.cat((image_crops, probability_crops), dim=1)
+            refined_chunks = [
+                self.segmentation_refinement_head(chunk)
+                for chunk in refinement_input.split(32, dim=0)
+            ]
+            logits_per_image.append(torch.cat(refined_chunks, dim=0))
+        return torch.stack(logits_per_image)
+
+    def _predict_target_crop_masks(
+        self,
+        images: torch.Tensor,
+        targets,
+        predicted_boxes: torch.Tensor,
+        predicted_logits: torch.Tensor,
+        coarse_masks: torch.Tensor,
+    ) -> list[torch.Tensor]:
+        logits_per_image = []
+        for image, target, image_boxes, image_logits, image_coarse_masks in zip(
+            images, targets, predicted_boxes, predicted_logits, coarse_masks
+        ):
+            valid_h, valid_w = (int(value) for value in target['size'].tolist())
+            image = image[:, :valid_h, :valid_w]
+            boxes = target['boxes'].detach().clamp(0.0, 1.0)
+            if boxes.shape[0] == 0:
+                logits_per_image.append(
+                    image.new_empty((0, *self.segmentation_crop_size))
+                )
+                continue
+
+            with torch.no_grad():
+                pairwise_iou, _ = box_ops.box_iou(
+                    box_ops.box_cxcywh_to_xyxy(image_boxes.detach()),
+                    box_ops.box_cxcywh_to_xyxy(boxes),
+                )
+                class_scores = image_logits.detach().sigmoid()[:, target['labels']]
+                selected_queries = (pairwise_iou + 0.25 * class_scores).argmax(dim=0)
+
+            selected_coarse_masks = image_coarse_masks[selected_queries]
+            image_crops = crop_tensor_by_boxes(
+                image[None],
+                boxes[None],
+                self.segmentation_crop_size,
+            )[0]
+            probability_crops = crop_instance_masks(
+                selected_coarse_masks.sigmoid(),
+                boxes,
+                self.segmentation_crop_size,
+            )[:, None]
+            probability_crops = scale_coarse_probability_hint(
+                probability_crops, self.coarse_hint_scale
+            )
+            refinement_input = torch.cat((image_crops, probability_crops), dim=1)
+            logits_per_image.append(
+                self.segmentation_refinement_head(refinement_input)
+            )
+        return logits_per_image
 
     def export(self):
         self._export = True
@@ -180,14 +284,34 @@ class LWDETR(nn.Module):
 
             outputs_class = self.class_embed(hs)
 
+            outputs_masks = None
             if self.segmentation_head is not None:
-                outputs_masks = self.segmentation_head(features[0].tensors, hs, samples.tensors.shape[-2:])
+                outputs_masks = self.segmentation_head(
+                    features[0].tensors, hs, samples.tensors.shape[-2:]
+                )
 
             out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
             if self.segmentation_head is not None:
-                out['pred_masks'] = outputs_masks[-1]
+                coarse_masks = outputs_masks[-1]
+                out['pred_masks_coarse'] = coarse_masks
+                if self.segmentation_mode == 'crop_and_resize':
+                    if self.training and targets is not None:
+                        out['pred_masks'] = coarse_masks
+                        out['pred_mask_crops'] = self._predict_target_crop_masks(
+                            samples.tensors, targets, outputs_coord[-1],
+                            outputs_class[-1], coarse_masks,
+                        )
+                    else:
+                        out['pred_masks'] = self._predict_crop_masks(
+                            samples.tensors, outputs_coord[-1], coarse_masks,
+                            samples.mask,
+                        )
+                else:
+                    out['pred_masks'] = coarse_masks
             if self.aux_loss:
-                out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord, outputs_masks if self.segmentation_head is not None else None)
+                out['aux_outputs'] = self._set_aux_loss(
+                    outputs_class, outputs_coord, outputs_masks
+                )
 
         if self.two_stage:
             group_detr = self.group_detr if self.training else 1
@@ -199,18 +323,30 @@ class LWDETR(nn.Module):
 
             cls_enc = torch.cat(cls_enc, dim=1)
 
+            masks_enc = None
             if self.segmentation_head is not None:
-                masks_enc = self.segmentation_head(features[0].tensors, [hs_enc,], samples.tensors.shape[-2:], skip_blocks=True)
+                masks_enc = self.segmentation_head(
+                    features[0].tensors,
+                    [hs_enc,],
+                    samples.tensors.shape[-2:],
+                    skip_blocks=True,
+                )
                 masks_enc = torch.cat(masks_enc, dim=1)
 
             if hs is not None:
                 out['enc_outputs'] = {'pred_logits': cls_enc, 'pred_boxes': ref_enc}
-                if self.segmentation_head is not None:
+                if masks_enc is not None:
                     out['enc_outputs']['pred_masks'] = masks_enc
             else:
                 out = {'pred_logits': cls_enc, 'pred_boxes': ref_enc}
                 if self.segmentation_head is not None:
-                    out['pred_masks'] = masks_enc
+                    if self.segmentation_mode == 'crop_and_resize':
+                        out['pred_masks_coarse'] = masks_enc
+                        out['pred_masks'] = self._predict_crop_masks(
+                            samples.tensors, ref_enc, masks_enc, samples.mask
+                        )
+                    else:
+                        out['pred_masks'] = masks_enc
 
         return out
 
@@ -237,14 +373,33 @@ class LWDETR(nn.Module):
                 outputs_coord = (self.bbox_embed(hs) + ref_unsigmoid).sigmoid()
             outputs_class = self.class_embed(hs)
             if self.segmentation_head is not None:
-                outputs_masks = self.segmentation_head(srcs[0], [hs,], tensors.shape[-2:])[0]
+                coarse_masks = self.segmentation_head(
+                    srcs[0], [hs,], tensors.shape[-2:]
+                )[0]
+                if self.segmentation_mode == 'crop_and_resize':
+                    final_boxes = outputs_coord[-1] if outputs_coord.ndim == 4 else outputs_coord
+                    outputs_masks = self._predict_crop_masks(
+                        tensors, final_boxes, coarse_masks
+                    )
+                else:
+                    outputs_masks = coarse_masks
         else:
             assert self.two_stage, "if not using decoder, two_stage must be True"
             outputs_class = self.transformer.enc_out_class_embed[0](hs_enc)
             outputs_coord = ref_enc
             if self.segmentation_head is not None:
-                outputs_masks = self.segmentation_head(srcs[0], [hs_enc,], tensors.shape[-2:], skip_blocks=True)[0]
-
+                coarse_masks = self.segmentation_head(
+                    srcs[0],
+                    [hs_enc,],
+                    tensors.shape[-2:],
+                    skip_blocks=True,
+                )[0]
+                if self.segmentation_mode == 'crop_and_resize':
+                    outputs_masks = self._predict_crop_masks(
+                        tensors, outputs_coord, coarse_masks
+                    )
+                else:
+                    outputs_masks = coarse_masks
         if outputs_masks is not None:
             return outputs_coord, outputs_class, outputs_masks
         else:
@@ -296,7 +451,9 @@ class SetCriterion(nn.Module):
                 use_varifocal_loss=False,
                 use_position_supervised_loss=False,
                 ia_bce_loss=False,
-                mask_point_sample_ratio: int = 16,):
+                mask_point_sample_ratio: int = 16,
+                segmentation_mode: str = 'full_image',
+                segmentation_crop_size=(128, 64)):
         """ Create the criterion.
         Parameters:
             num_classes: number of object categories, omitting the special no-object category
@@ -316,6 +473,8 @@ class SetCriterion(nn.Module):
         self.sum_group_losses = sum_group_losses
         self.use_varifocal_loss = use_varifocal_loss
         self.use_position_supervised_loss = use_position_supervised_loss
+        self.segmentation_mode = segmentation_mode
+        self.segmentation_crop_size = tuple(segmentation_crop_size)
         self.ia_bce_loss = ia_bce_loss
         self.mask_point_sample_ratio = mask_point_sample_ratio
 
@@ -451,21 +610,87 @@ class SetCriterion(nn.Module):
         losses['loss_giou'] = loss_giou.sum() / num_boxes
         return losses
     
+
+    def _loss_crop_masks(self, outputs, targets):
+        logits_per_image = outputs.get('pred_mask_crops')
+        if logits_per_image is None:
+            raise KeyError("pred_mask_crops missing for crop_and_resize segmentation.")
+
+        crop_logits = []
+        crop_targets = []
+        for logits, target in zip(logits_per_image, targets):
+            target_crops = crop_instance_masks(
+                target['masks'],
+                target['boxes'],
+                self.segmentation_crop_size,
+            )
+            if logits.shape != target_crops.shape:
+                raise ValueError(
+                    f"Crop mask shape mismatch: {tuple(logits.shape)} != "
+                    f"{tuple(target_crops.shape)}"
+                )
+            crop_logits.append(logits)
+            crop_targets.append(target_crops)
+
+        if not crop_logits or sum(item.shape[0] for item in crop_logits) == 0:
+            zero = outputs['pred_logits'].sum() * 0.0
+            return {
+                'loss_mask_refine_ce': zero,
+                'loss_mask_refine_dice': zero,
+                'loss_mask_refine_boundary': zero,
+            }
+
+        src_masks = torch.cat(crop_logits, dim=0)
+        target_masks = torch.cat(crop_targets, dim=0).to(src_masks.dtype)
+        loss_mask_refine_ce = F.binary_cross_entropy_with_logits(
+            src_masks, target_masks, reduction='none'
+        ).mean(dim=(1, 2)).mean()
+
+        probabilities = src_masks.sigmoid()
+        numerator = 2.0 * (probabilities * target_masks).sum(dim=(1, 2)) + 1.0
+        denominator = (
+            probabilities.sum(dim=(1, 2)) + target_masks.sum(dim=(1, 2)) + 1.0
+        )
+        loss_mask_refine_dice = (1.0 - numerator / denominator).mean()
+
+        target_4d = target_masks[:, None]
+        with torch.no_grad():
+            dilated = F.max_pool2d(target_4d, kernel_size=5, stride=1, padding=2)
+            eroded = -F.max_pool2d(-target_4d, kernel_size=5, stride=1, padding=2)
+            boundary = (dilated - eroded).clamp(0, 1)[:, 0]
+        boundary_bce = F.binary_cross_entropy_with_logits(
+            src_masks, target_masks, reduction='none'
+        )
+        loss_mask_refine_boundary = (
+            boundary_bce * (1.0 + 4.0 * boundary)
+        ).mean(dim=(1, 2)).mean()
+
+        return {
+            'loss_mask_refine_ce': loss_mask_refine_ce,
+            'loss_mask_refine_dice': loss_mask_refine_dice,
+            'loss_mask_refine_boundary': loss_mask_refine_boundary,
+        }
+
     def loss_masks(self, outputs, targets, indices, num_boxes):
         """Compute BCE-with-logits and Dice losses for segmentation masks on matched pairs.
         Expects outputs to contain 'pred_masks' of shape [B, Q, H, W] and targets with key 'masks'.
         """
-        assert 'pred_masks' in outputs, "pred_masks missing in model outputs"
-        pred_masks = outputs['pred_masks']  # [B, Q, H, W]
+        mask_key = 'pred_masks_coarse' if 'pred_masks_coarse' in outputs else 'pred_masks'
+        assert mask_key in outputs, f"{mask_key} missing in model outputs"
+        pred_masks = outputs[mask_key]  # [B, Q, H, W]
         # gather matched prediction masks
         idx = self._get_src_permutation_idx(indices)
         src_masks = pred_masks[idx]  # [N, H, W]
         # handle no matches
         if src_masks.numel() == 0:
-            return {
+            losses = {
                 'loss_mask_ce': src_masks.sum(),
                 'loss_mask_dice': src_masks.sum(),
+                'loss_mask_boundary': src_masks.sum(),
             }
+            if 'pred_mask_crops' in outputs:
+                losses.update(self._loss_crop_masks(outputs, targets))
+            return losses
         # gather matched target masks
         target_masks = torch.cat([t['masks'][j] for t, (_, j) in zip(targets, indices)], dim=0)  # [N, Ht, Wt]
         
@@ -503,6 +728,28 @@ class SetCriterion(nn.Module):
             "loss_mask_ce": sigmoid_ce_loss_jit(point_logits, point_labels, num_boxes),
             "loss_mask_dice": dice_loss_jit(point_logits, point_labels, num_boxes),
         }
+
+        # Boundary-aware term: pixels whose local neighborhood contains both fg/bg
+        # (i.e. near the GT contour) get up-weighted in a BCE loss. This targets
+        # low edge-contrast cases (metal/prosthetic artifacts) where the interior
+        # of the mask is easy but the boundary is ambiguous and otherwise
+        # under-supervised relative to the large flat interior region.
+        with torch.no_grad():
+            dilated = F.max_pool2d(target_masks, kernel_size=5, stride=1, padding=2)
+            eroded = -F.max_pool2d(-target_masks, kernel_size=5, stride=1, padding=2)
+            boundary_map = (dilated - eroded).clamp(0, 1)
+            boundary_weight = point_sample(
+                boundary_map,
+                point_coords,
+                align_corners=False,
+            ).squeeze(1)
+
+        bce = F.binary_cross_entropy_with_logits(point_logits, point_labels, reduction="none")
+        loss_mask_boundary = (bce * (1.0 + 4.0 * boundary_weight)).sum(-1).mean() / num_boxes
+        losses["loss_mask_boundary"] = loss_mask_boundary
+
+        if 'pred_mask_crops' in outputs:
+            losses.update(self._loss_crop_masks(outputs, targets))
 
         del src_masks
         del target_masks
@@ -558,16 +805,17 @@ class SetCriterion(nn.Module):
         for loss in self.losses:
             losses.update(self.get_loss(loss, outputs, targets, indices, num_boxes))
 
-        # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
+        # In case of auxiliary losses, repeat detection losses for intermediate layers.
         if 'aux_outputs' in outputs:
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
                 indices = self.matcher(aux_outputs, targets, group_detr=group_detr)
                 for loss in self.losses:
                     kwargs = {}
                     if loss == 'labels':
-                        # Logging is enabled only for the last layer
                         kwargs = {'log': False}
-                    l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_boxes, **kwargs)
+                    l_dict = self.get_loss(
+                        loss, aux_outputs, targets, indices, num_boxes, **kwargs
+                    )
                     l_dict = {k + f'_{i}': v for k, v in l_dict.items()}
                     losses.update(l_dict)
 
@@ -577,9 +825,10 @@ class SetCriterion(nn.Module):
             for loss in self.losses:
                 kwargs = {}
                 if loss == 'labels':
-                    # Logging is enabled only for the last layer
                     kwargs['log'] = False
-                l_dict = self.get_loss(loss, enc_outputs, targets, indices, num_boxes, **kwargs)
+                l_dict = self.get_loss(
+                    loss, enc_outputs, targets, indices, num_boxes, **kwargs
+                )
                 l_dict = {k + f'_enc': v for k, v in l_dict.items()}
                 losses.update(l_dict)
 
@@ -708,9 +957,10 @@ def calculate_uncertainty(logits):
 
 class PostProcess(nn.Module):
     """ This module converts the model's output into the format expected by the coco api"""
-    def __init__(self, num_select=300) -> None:
+    def __init__(self, num_select=300, segmentation_mode='full_image') -> None:
         super().__init__()
         self.num_select = num_select
+        self.segmentation_mode = segmentation_mode
 
     @torch.no_grad()
     def forward(self, outputs, target_sizes):
@@ -748,7 +998,19 @@ class PostProcess(nn.Module):
                 k_idx = topk_boxes[i]
                 masks_i = torch.gather(out_masks[i], 0, k_idx.unsqueeze(-1).unsqueeze(-1).repeat(1, out_masks.shape[-2], out_masks.shape[-1]))  # [K, Hm, Wm]
                 h, w = target_sizes[i].tolist()
-                masks_i = F.interpolate(masks_i.unsqueeze(1), size=(int(h), int(w)), mode='bilinear', align_corners=False)  # [K,1,H,W]
+                if self.segmentation_mode == 'crop_and_resize':
+                    masks_i = paste_masks_in_image(
+                        masks_i,
+                        boxes[i],
+                        (int(h), int(w)),
+                    )[:, None]
+                else:
+                    masks_i = F.interpolate(
+                        masks_i.unsqueeze(1),
+                        size=(int(h), int(w)),
+                        mode='bilinear',
+                        align_corners=False,
+                    )
                 res_i['masks'] = masks_i > 0.0
                 results.append(res_i)
         else:
@@ -819,12 +1081,32 @@ def build_model(args):
     args.num_feature_levels = len(args.projector_scale)
     transformer = build_transformer(args)
 
-    segmentation_head = SegmentationHead(args.hidden_dim, args.dec_layers, downsample_ratio=args.mask_downsample_ratio) if args.segmentation_head else None
+    segmentation_mode = getattr(args, 'segmentation_mode', 'full_image')
+    segmentation_crop_size = tuple(
+        getattr(args, 'segmentation_crop_size', (128, 64))
+    )
+    coarse_hint_scale = getattr(args, 'coarse_hint_scale', 0.35)
+    if not args.segmentation_head:
+        segmentation_head = None
+        segmentation_refinement_head = None
+    else:
+        segmentation_head = SegmentationHead(
+            args.hidden_dim,
+            args.dec_layers,
+            downsample_ratio=args.mask_downsample_ratio,
+        )
+        segmentation_refinement_head = (
+            CropAndResizeSegmentationHead(output_size=segmentation_crop_size)
+            if segmentation_mode == 'crop_and_resize'
+            else None
+        )
 
     model = LWDETR(
         backbone,
         transformer,
         segmentation_head,
+        segmentation_refinement_head,
+        coarse_hint_scale=coarse_hint_scale,
         num_classes=num_classes,
         num_queries=args.num_queries,
         aux_loss=args.aux_loss,
@@ -832,17 +1114,24 @@ def build_model(args):
         two_stage=args.two_stage,
         lite_refpoint_refine=args.lite_refpoint_refine,
         bbox_reparam=args.bbox_reparam,
+        segmentation_mode=segmentation_mode,
+        segmentation_crop_size=segmentation_crop_size,
     )
     return model
 
 def build_criterion_and_postprocessors(args):
     device = torch.device(args.device)
+    segmentation_mode = getattr(args, 'segmentation_mode', 'full_image')
+    segmentation_crop_size = tuple(
+        getattr(args, 'segmentation_crop_size', (128, 64))
+    )
     matcher = build_matcher(args)
     weight_dict = {'loss_ce': args.cls_loss_coef, 'loss_bbox': args.bbox_loss_coef}
     weight_dict['loss_giou'] = args.giou_loss_coef
     if args.segmentation_head:
         weight_dict['loss_mask_ce'] = args.mask_ce_loss_coef
         weight_dict['loss_mask_dice'] = args.mask_dice_loss_coef
+        weight_dict['loss_mask_boundary'] = getattr(args, 'mask_boundary_loss_coef', 2.0)
     # TODO this is a hack
     if args.aux_loss:
         aux_weight_dict = {}
@@ -851,6 +1140,12 @@ def build_criterion_and_postprocessors(args):
         if args.two_stage:
             aux_weight_dict.update({k + f'_enc': v for k, v in weight_dict.items()})
         weight_dict.update(aux_weight_dict)
+    if segmentation_mode == 'crop_and_resize':
+        weight_dict['loss_mask_refine_ce'] = args.mask_ce_loss_coef
+        weight_dict['loss_mask_refine_dice'] = args.mask_dice_loss_coef
+        weight_dict['loss_mask_refine_boundary'] = getattr(
+            args, 'mask_boundary_loss_coef', 2.0
+        )
 
     losses = ['labels', 'boxes', 'cardinality']
     if args.segmentation_head:
@@ -867,7 +1162,9 @@ def build_criterion_and_postprocessors(args):
                                 use_varifocal_loss = args.use_varifocal_loss,
                                 use_position_supervised_loss=args.use_position_supervised_loss,
                                 ia_bce_loss=args.ia_bce_loss,
-                                mask_point_sample_ratio=args.mask_point_sample_ratio)
+                                mask_point_sample_ratio=args.mask_point_sample_ratio,
+                                segmentation_mode=segmentation_mode,
+                                segmentation_crop_size=segmentation_crop_size)
     else:
         criterion = SetCriterion(args.num_classes + 1, matcher=matcher, weight_dict=weight_dict,
                                 focal_alpha=args.focal_alpha, losses=losses, 
@@ -876,6 +1173,9 @@ def build_criterion_and_postprocessors(args):
                                 use_position_supervised_loss=args.use_position_supervised_loss,
                                 ia_bce_loss=args.ia_bce_loss)
     criterion.to(device)
-    postprocess = PostProcess(num_select=args.num_select)
+    postprocess = PostProcess(
+        num_select=args.num_select,
+        segmentation_mode=segmentation_mode,
+    )
 
     return criterion, postprocess
