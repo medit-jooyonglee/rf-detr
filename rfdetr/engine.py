@@ -419,6 +419,7 @@ def draw_preditions_boxes(
     fname='', origin_size=None,
     segmentation_mode='full_image',
     mask_probability_threshold=0.5,
+    paste_masks_at_original_size=False,
 ):
     """Draw predictions, optionally restoring the rendered output to its original size.
 
@@ -426,6 +427,9 @@ def draw_preditions_boxes(
         origin_size: Original image size as ``(height, width)``. When provided,
             the input image, bounding boxes, and segmentation mask are restored
             from the model input size to this size before rendering.
+        paste_masks_at_original_size: In ``crop_and_resize`` mode, paste ROI mask
+            logits directly onto an ``origin_size`` canvas before thresholding.
+            This avoids resizing an already-thresholded label map.
     """
     from trainer import torch_utils
     from rfdetr.datasets.teeth import draw_bboxes
@@ -465,24 +469,70 @@ def draw_preditions_boxes(
     # logits = torch_utils.to_numpy(outputs['pred_logits'].to(torch.float32))
     pred_scores = np.max(probs, axis=-1)
     pred_label = np.argmax(probs, axis=-1)
+
+    confidence_threshold = 0.5
+    selected_query_indices = None
+    if nms_refinement:
+        selected_query_indices = []
+        nms_bboxes = []
+        nms_labels = []
+        nms_scores = []
+
+        for ib in range(boxes.shape[0]):
+            posit = (pred_scores[ib] > confidence_threshold) & (pred_label[ib] > 0)
+            keep_indices = non_max_suppression(
+                boxes[ib][posit], pred_scores[ib][posit], threshold=0.4
+            )
+            keep_indices = np.where(posit)[0][keep_indices]
+            selected_query_indices.append(keep_indices)
+            print(f'batch {ib}: nms {posit.sum()}--->{len(keep_indices)}')
+            nms_bboxes.append(boxes[ib][keep_indices])
+            nms_labels.append(pred_label[ib][keep_indices])
+            nms_scores.append(pred_scores[ib][keep_indices])
+
+        pred_label = nms_labels
+        pred_scores = nms_scores
+        boxes = nms_bboxes
     
     pred_masks = outputs.get('pred_masks')
     if pred_masks is not None:
+        if not 0.0 < mask_probability_threshold < 1.0:
+            raise ValueError("mask_probability_threshold must be between 0 and 1.")
+        mask_logit_threshold = math.log(
+            mask_probability_threshold / (1.0 - mask_probability_threshold)
+        )
         if segmentation_mode == 'crop_and_resize':
             from rfdetr.models.segmentation_head import paste_masks_in_image
-            pasted_masks = []
+
+            # ROI masks are expensive to reconstruct at full image resolution.
+            # Select positive, NMS-surviving queries before pasting so discarded
+            # background/duplicate queries never allocate a full-image canvas.
+            pred_masks_label = []
             for batch_index in range(pred_masks.shape[0]):
-                pasted_masks.append(
-                    paste_masks_in_image(
-                        pred_masks[batch_index],
-                        torch.as_tensor(
-                            boxes[batch_index],
-                            device=pred_masks.device,
-                        ),
-                        tuple(inputs_arrays.shape[-2:]),
+                batch_masks = pred_masks[batch_index]
+                if selected_query_indices is not None:
+                    query_indices = torch.as_tensor(
+                        selected_query_indices[batch_index],
+                        device=pred_masks.device,
+                        dtype=torch.long,
                     )
+                    batch_masks = batch_masks.index_select(0, query_indices)
+
+                paste_boxes = boxes[batch_index]
+                paste_size = (height, width)
+                if paste_masks_at_original_size and origin_size is not None:
+                    paste_boxes = paste_boxes.copy()
+                    paste_boxes[..., [0, 2]] *= render_width / width
+                    paste_boxes[..., [1, 3]] *= render_height / height
+                    paste_size = (render_height, render_width)
+                pasted_masks = paste_masks_in_image(
+                    batch_masks,
+                    torch.as_tensor(paste_boxes, device=pred_masks.device),
+                    paste_size,
                 )
-            pred_masks = torch.stack(pasted_masks)
+                pred_masks_label.append(
+                    torch_utils.to_numpy(pasted_masks > mask_logit_threshold)
+                )
         else:
             pred_masks = F.interpolate(
                 pred_masks,
@@ -490,44 +540,16 @@ def draw_preditions_boxes(
                 mode='bilinear',
                 align_corners=False,
             )
-        if not 0.0 < mask_probability_threshold < 1.0:
-            raise ValueError("mask_probability_threshold must be between 0 and 1.")
-        mask_logit_threshold = math.log(
-            mask_probability_threshold / (1.0 - mask_probability_threshold)
-        )
-        pred_masks_label = torch_utils.to_numpy(
-            pred_masks > mask_logit_threshold
-        )
+            pred_masks_label = torch_utils.to_numpy(
+                pred_masks > mask_logit_threshold
+            )
+            if selected_query_indices is not None:
+                pred_masks_label = [
+                    pred_masks_label[ib][indices]
+                    for ib, indices in enumerate(selected_query_indices)
+                ]
     else:
         pred_masks_label = None
-    confidence_threshold = 0.5
-    if nms_refinement:
-        nms_bboxes = []
-        nms_labels = []
-        nms_scores = []
-        nms_masks_labels = []
-        
-        for ib in range(boxes.shape[0]):
-            posit = (pred_scores[ib] > confidence_threshold) & (pred_label[ib] > 0)
-            # print(posit.sum())
-        
-            keep_indices = non_max_suppression(boxes[ib][posit], pred_scores[ib][posit], threshold=0.4)
-            
-            posit_inds = np.where(posit)[0]
-            keep_indices = posit_inds[keep_indices]
-            print(f'batch {ib}: nms {posit.sum()}--->{len(keep_indices)}')
-            # nms_bboxes
-            nms_bboxes.append(boxes[ib][keep_indices])
-            nms_labels.append(pred_label[ib][keep_indices])
-            nms_scores.append(pred_scores[ib][keep_indices])
-            if pred_masks_label is not None:
-                nms_masks_labels.append(pred_masks_label[ib][keep_indices])
-                
-        pred_label = nms_labels
-        pred_scores = nms_scores
-        boxes = nms_bboxes
-        pred_masks_label = nms_masks_labels
-        # pred_label = np.con
 
     if isinstance(pred_label, list):
         label = []
@@ -601,13 +623,19 @@ def draw_preditions_boxes(
         draw_bboxes(image, boxes_xy, colors=colors[posit_labels])
         if pred_masks_label is not None and len(pred_masks_label) > 0:
             posit_masks = pred_masks_label[i]
-            label_image = posit_labels[:, None, None] * posit_masks
-            label_image = np.max(label_image, axis=0)
-            restore_label_image = cv2.resize(
-                label_image,
-                (render_width, render_height),
-                interpolation=cv2.INTER_NEAREST,
-            )
+            if len(posit_masks) == 0:
+                label_image = np.zeros(posit_masks.shape[-2:], dtype=np.int64)
+            else:
+                label_image = posit_labels[:, None, None] * posit_masks
+                label_image = np.max(label_image, axis=0)
+            if label_image.shape != (render_height, render_width):
+                restore_label_image = cv2.resize(
+                    label_image,
+                    (render_width, render_height),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+            else:
+                restore_label_image = label_image
             mask_images.append(restore_label_image)
             color_label_image = colors[restore_label_image]
             # image_utils.

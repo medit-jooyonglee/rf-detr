@@ -81,13 +81,13 @@ def main(use_ema=True):
     from trainer import torch_utils
     # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle/Teeth Segmentation JSON/d2/img/'
     # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_teeth_seg_kaggle/Teeth Segmentation PNG/d2/img/'
-    # path = 'E:/dataset/reverse_tomosynthesis/cbct_ios_dcm'
+    path = 'E:/dataset/reverse_tomosynthesis/cbct_ios_dcm'
     # path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON'
     # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm/'
-    path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_0824/JPEGImages/'
+    # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_0824/JPEGImages/'
     # path = 
     
-    mask_save_dir = 'E:/dataset/reverse_tomosynthesis/cbct_ios_dcm_mask_results_0828'
+    mask_save_dir = 'E:/dataset/reverse_tomosynthesis/cbct_ios_dcm_mask_results_0828_testestt'
     found = diskmanager.deep_search_files(path, exts=['.jpg', '.jpeg'])
     # found = glob.glob(f'{path}/*.jpg')
     i_break = 30
@@ -113,6 +113,7 @@ def main(use_ema=True):
                     img_tensor, outputs, save=False, origin_size=img.shape[:2],
                                         segmentation_mode='crop_and_resize',
                     mask_probability_threshold=MASK_PROBABILITY_THRESHOLD,
+                    paste_masks_at_original_size=True,
                 )
                 
                 
@@ -161,10 +162,10 @@ def init_and_get_model(config=None, device='cuda', export=False, use_ema=True):
             coarse_hint_scale=0.35,
 
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
-            # pretrain_weights='e:/temp/checkpoint.pth'
+            pretrain_weights='e:/temp/checkpoint.pth',
             
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_0819_all/checkpoint.pth',
-            pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_0819_crop_retrain/checkpoint.pth',
+            # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_0819_crop_retrain/checkpoint.pth',
             # 'output/xray_teeth33_dinov2tiny_small_seg_crop_retrain'
             # 'output/xray_teeth33_dinov2tiny_small_seg_0819_all/eval'
             **config,
@@ -452,4 +453,4 @@ if __name__ == '__main__':
     # coreml_export_main()
     # test_coreml_inference()
     # inference_libtorch_model_main()
-# 
+#
