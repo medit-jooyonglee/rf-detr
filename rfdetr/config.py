@@ -40,6 +40,9 @@ class ModelConfig(BaseModel):
     segmentation_mode: Literal["full_image", "crop_and_resize"] = "full_image"
     segmentation_crop_size: Tuple[int, int] = (128, 64)
     coarse_hint_scale: float = 0.35
+    segmentation_crop_box_scale: float = 1.15
+    coarse_hint_dropout: float = 0.30
+    refine_outer_boundary_loss_coef: float = 4.0
     
     # dino-v2 antialias option
     antialias: bool = True
@@ -170,6 +173,9 @@ class TrainConfig(BaseModel):
     segmentation_mode: Literal["full_image", "crop_and_resize"] = "full_image"
     segmentation_crop_size: Tuple[int, int] = (128, 64)
     coarse_hint_scale: float = 0.35
+    segmentation_crop_box_scale: float = 1.15
+    coarse_hint_dropout: float = 0.30
+    refine_outer_boundary_loss_coef: float = 4.0
 
 
 class SegmentationTrainConfig(TrainConfig):

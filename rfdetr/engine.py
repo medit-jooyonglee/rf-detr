@@ -283,7 +283,17 @@ def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=N
             outputs = model(samples)
             
             if getattr(args, 'eval_save', False):
-                draw_preditions_boxes(samples, outputs, save=True)
+                draw_preditions_boxes(
+                    samples,
+                    outputs,
+                    save=True,
+                    segmentation_mode=getattr(
+                        args, 'segmentation_mode', 'full_image'
+                    ),
+                    segmentation_crop_box_scale=getattr(
+                        args, 'segmentation_crop_box_scale', 1.15
+                    ),
+                )
 
         if args.fp16_eval:
             for key in outputs.keys():
@@ -419,7 +429,10 @@ def draw_preditions_boxes(
     fname='', origin_size=None,
     segmentation_mode='full_image',
     mask_probability_threshold=0.5,
+    segmentation_crop_box_scale=1.15,
+    with_source_concat=False,
     paste_masks_at_original_size=False,
+    input_content_box=None,
 ):
     """Draw predictions, optionally restoring the rendered output to its original size.
 
@@ -430,6 +443,9 @@ def draw_preditions_boxes(
         paste_masks_at_original_size: In ``crop_and_resize`` mode, paste ROI mask
             logits directly onto an ``origin_size`` canvas before thresholding.
             This avoids resizing an already-thresholded label map.
+        input_content_box: Optional valid-image region ``(x0, y0, x1, y1)`` in
+            model-input pixels. Use this when the input was letterboxed so boxes,
+            masks, and the rendered image are restored without including padding.
     """
     from trainer import torch_utils
     from rfdetr.datasets.teeth import draw_bboxes
@@ -451,7 +467,17 @@ def draw_preditions_boxes(
         inputs_arrays  = torch_utils.to_numpy(new_samples.tensors)
     elif isinstance(new_samples, torch.Tensor):
         inputs_arrays  = torch_utils.to_numpy(new_samples)
-    boxes = torch_utils.to_numpy(outputs['pred_boxes'])
+    normalized_boxes = outputs['pred_boxes']
+    boxes = torch_utils.to_numpy(normalized_boxes)
+    mask_boxes = boxes
+    if segmentation_mode == 'crop_and_resize':
+        from rfdetr.models.segmentation_head import expand_normalized_boxes
+        mask_boxes = torch_utils.to_numpy(
+            expand_normalized_boxes(
+                normalized_boxes,
+                segmentation_crop_box_scale,
+            )
+        )
     probs = outputs['pred_logits'].sigmoid()
     probs = torch_utils.to_numpy(probs.to(torch.float32))
     
@@ -463,9 +489,37 @@ def draw_preditions_boxes(
         render_height, render_width = (int(value) for value in origin_size)
         if render_height <= 0 or render_width <= 0:
             raise ValueError("origin_size values must be positive")
+    if input_content_box is not None:
+        if origin_size is None:
+            raise ValueError("input_content_box requires origin_size")
+        if len(input_content_box) != 4:
+            raise ValueError("input_content_box must be an (x0, y0, x1, y1) tuple")
+        content_x0, content_y0, content_x1, content_y1 = (
+            float(value) for value in input_content_box
+        )
+        if not (
+            0 <= content_x0 < content_x1 <= width
+            and 0 <= content_y0 < content_y1 <= height
+        ):
+            raise ValueError("input_content_box must lie inside the model input")
+
+    def restore_boxes(boxes_xyxy):
+        restored = boxes_xyxy.copy()
+        if input_content_box is None:
+            restored[..., [0, 2]] *= render_width / width
+            restored[..., [1, 3]] *= render_height / height
+        else:
+            restored[..., [0, 2]] = (
+                restored[..., [0, 2]] - content_x0
+            ) * (render_width / (content_x1 - content_x0))
+            restored[..., [1, 3]] = (
+                restored[..., [1, 3]] - content_y0
+            ) * (render_height / (content_y1 - content_y0))
+        return restored
     # posit = pred_scores[i] > threshold
     # (batch, num_queries, 4) 
     boxes = denorm_boxes_to_xyxy(boxes, width, height)
+    mask_boxes = denorm_boxes_to_xyxy(mask_boxes, width, height)
     # logits = torch_utils.to_numpy(outputs['pred_logits'].to(torch.float32))
     pred_scores = np.max(probs, axis=-1)
     pred_label = np.argmax(probs, axis=-1)
@@ -477,6 +531,7 @@ def draw_preditions_boxes(
         nms_bboxes = []
         nms_labels = []
         nms_scores = []
+        nms_mask_bboxes = []
 
         for ib in range(boxes.shape[0]):
             posit = (pred_scores[ib] > confidence_threshold) & (pred_label[ib] > 0)
@@ -487,14 +542,18 @@ def draw_preditions_boxes(
             selected_query_indices.append(keep_indices)
             print(f'batch {ib}: nms {posit.sum()}--->{len(keep_indices)}')
             nms_bboxes.append(boxes[ib][keep_indices])
+            nms_mask_bboxes.append(mask_boxes[ib][keep_indices])
             nms_labels.append(pred_label[ib][keep_indices])
             nms_scores.append(pred_scores[ib][keep_indices])
 
         pred_label = nms_labels
         pred_scores = nms_scores
         boxes = nms_bboxes
+        mask_boxes = nms_mask_bboxes
     
     pred_masks = outputs.get('pred_masks')
+    confidence_threshold = 0.5
+    
     if pred_masks is not None:
         if not 0.0 < mask_probability_threshold < 1.0:
             raise ValueError("mask_probability_threshold must be between 0 and 1.")
@@ -518,12 +577,10 @@ def draw_preditions_boxes(
                     )
                     batch_masks = batch_masks.index_select(0, query_indices)
 
-                paste_boxes = boxes[batch_index]
+                paste_boxes = mask_boxes[batch_index]
                 paste_size = (height, width)
                 if paste_masks_at_original_size and origin_size is not None:
-                    paste_boxes = paste_boxes.copy()
-                    paste_boxes[..., [0, 2]] *= render_width / width
-                    paste_boxes[..., [1, 3]] *= render_height / height
+                    paste_boxes = restore_boxes(paste_boxes)
                     paste_size = (render_height, render_width)
                 pasted_masks = paste_masks_in_image(
                     batch_masks,
@@ -595,7 +652,15 @@ def draw_preditions_boxes(
     for i in range(num_batch):
         
         image = image_utils.to_magnitude_images(images[i])
-        if (render_height, render_width) != (height, width):
+        if (
+            input_content_box is not None
+            or (render_height, render_width) != (height, width)
+        ):
+            if input_content_box is not None:
+                image = image[
+                    int(content_y0):int(content_y1),
+                    int(content_x0):int(content_x1),
+                ]
             image = cv2.resize(
                 image,
                 (render_width, render_height),
@@ -611,12 +676,14 @@ def draw_preditions_boxes(
         posit_boxes = boxes[i]
         posit_labels = label[i]
         boxes_xy = posit_boxes.copy()
-        if (render_height, render_width) != (height, width):
-            boxes_xy[..., [0, 2]] *= render_width / width
-            boxes_xy[..., [1, 3]] *= render_height / height
+        if (
+            input_content_box is not None
+            or (render_height, render_width) != (height, width)
+        ):
+            boxes_xy = restore_boxes(boxes_xy)
         # boxes_xy = 
         
-        
+        src_image = image.copy()
         
         # t_boxes_xy = torch_utils.data_convert(boxes_xy)
         # iou, _ = box_ops.box_iou(t_boxes_xy, t_boxes_xy)
@@ -628,7 +695,20 @@ def draw_preditions_boxes(
             else:
                 label_image = posit_labels[:, None, None] * posit_masks
                 label_image = np.max(label_image, axis=0)
-            if label_image.shape != (render_height, render_width):
+            mask_is_already_restored = (
+                segmentation_mode == 'crop_and_resize'
+                and paste_masks_at_original_size
+                and origin_size is not None
+            )
+            if (
+                label_image.shape != (render_height, render_width)
+                or (input_content_box is not None and not mask_is_already_restored)
+            ):
+                if input_content_box is not None:
+                    label_image = label_image[
+                        int(content_y0):int(content_y1),
+                        int(content_x0):int(content_x1),
+                    ]
                 restore_label_image = cv2.resize(
                     label_image,
                     (render_width, render_height),
@@ -640,6 +720,9 @@ def draw_preditions_boxes(
             color_label_image = colors[restore_label_image]
             # image_utils.
             image = utils_numpy.apply_blending_mask(image, color_label_image)
+            if with_source_concat:
+                image = np.concatenate([src_image, image], axis=1)
+                
         res_images.append(image)
 
         if save:

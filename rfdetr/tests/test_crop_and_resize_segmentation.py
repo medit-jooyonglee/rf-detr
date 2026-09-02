@@ -1,13 +1,115 @@
 import torch
 import numpy as np
+import torch.nn as nn
 
+from rfdetr.models.lwdetr import LWDETR, SetCriterion
 from rfdetr.models.segmentation_head import (
     CropAndResizeSegmentationHead,
     crop_instance_masks,
     crop_tensor_by_boxes,
+    expand_normalized_boxes,
     scale_coarse_probability_hint,
     paste_masks_in_image,
 )
+
+
+def test_expand_normalized_boxes_adds_context_and_clips_edges():
+    boxes = torch.tensor([
+        [0.5, 0.5, 0.4, 0.6],
+        [0.05, 0.05, 0.2, 0.2],
+    ])
+
+    expanded = expand_normalized_boxes(boxes, 1.15)
+
+    assert torch.allclose(
+        expanded[0], torch.tensor([0.5, 0.5, 0.46, 0.69])
+    )
+    expanded_xyxy = torch.stack((
+        expanded[:, 0] - expanded[:, 2] / 2,
+        expanded[:, 1] - expanded[:, 3] / 2,
+        expanded[:, 0] + expanded[:, 2] / 2,
+        expanded[:, 1] + expanded[:, 3] / 2,
+    ), dim=1)
+    assert expanded_xyxy.min() >= 0.0
+    assert expanded_xyxy.max() <= 1.0
+
+
+def _make_refinement_model(dropout=0.0):
+    model = LWDETR.__new__(LWDETR)
+    nn.Module.__init__(model)
+    model.segmentation_crop_size = (128, 64)
+    model.segmentation_crop_box_scale = 1.15
+    model.coarse_hint_scale = 0.35
+    model.coarse_hint_dropout = dropout
+    model.segmentation_refinement_head = _SumChannelsHead()
+    return model
+
+
+class _SumChannelsHead(nn.Module):
+    def forward(self, inputs):
+        return inputs.sum(dim=1)
+
+
+def test_refinement_detaches_coarse_mask_gradient():
+    model = _make_refinement_model()
+    model.train()
+    images = torch.rand(1, 3, 32, 32, requires_grad=True)
+    coarse_masks = torch.rand(1, 2, 8, 8, requires_grad=True)
+    targets = [{
+        'boxes': torch.tensor([[0.5, 0.5, 0.5, 0.5]]),
+        'labels': torch.tensor([1]),
+        'size': torch.tensor([32, 32]),
+    }]
+
+    refined = model._predict_target_crop_masks(
+        images,
+        targets,
+        torch.tensor([[[0.5, 0.5, 0.5, 0.5], [0.2, 0.2, 0.2, 0.2]]]),
+        torch.tensor([[[0.0, 1.0], [0.0, 0.0]]]),
+        coarse_masks,
+    )[0]
+    refined.mean().backward()
+
+    assert images.grad is not None
+    assert images.grad.abs().sum() > 0
+    assert coarse_masks.grad is None
+
+
+def test_coarse_hint_dropout_drops_whole_instance_hints():
+    model = _make_refinement_model(dropout=0.30)
+    model.train()
+    torch.manual_seed(0)
+
+    hints = model._prepare_coarse_hint(torch.ones(64, 1, 4, 4))
+    dropped = (hints == 0).flatten(1).all(dim=1)
+
+    assert 0 < dropped.sum() < hints.shape[0]
+    assert torch.all((hints == 0) | (hints == 0.35))
+
+
+def test_crop_loss_includes_outer_false_positive_ring():
+    criterion = SetCriterion.__new__(SetCriterion)
+    nn.Module.__init__(criterion)
+    criterion.segmentation_crop_size = (128, 64)
+    criterion.segmentation_crop_box_scale = 1.15
+    crop_logits = torch.zeros(1, 128, 64, requires_grad=True)
+    target_mask = torch.zeros(1, 64, 64)
+    target_mask[:, 20:44, 24:40] = 1.0
+
+    losses = criterion._loss_crop_masks(
+        {
+            'pred_mask_crops': [crop_logits],
+            'pred_logits': torch.zeros(1, 1, 2),
+        },
+        [{
+            'boxes': torch.tensor([[0.5, 0.5, 0.5, 0.5]]),
+            'masks': target_mask,
+        }],
+    )
+
+    assert losses['loss_mask_refine_outer'] > 0
+    sum(losses.values()).backward()
+    assert crop_logits.grad is not None
 
 def test_scale_coarse_probability_hint_centers_and_scales():
     probability = torch.tensor([0.0, 0.5, 1.0])
@@ -97,7 +199,7 @@ def test_draw_predictions_pastes_only_positive_nms_queries(monkeypatch):
     monkeypatch.setattr(
         image_utils,
         "to_magnitude_images",
-        lambda image: np.zeros((*image.shape[-2:], 3), dtype=np.uint8),
+        lambda image: np.zeros((*image.shape[:2], 3), dtype=np.uint8),
     )
     monkeypatch.setattr(
         utils_numpy, "apply_blending_mask", lambda image, color_mask: image
@@ -125,6 +227,7 @@ def test_draw_predictions_pastes_only_positive_nms_queries(monkeypatch):
         origin_size=(80, 100),
         segmentation_mode="crop_and_resize",
         paste_masks_at_original_size=True,
+        input_content_box=(5, 0, 45, 40),
     )
 
     # Query 0 is background, query 2 is removed by NMS, and query 3 is below
@@ -132,7 +235,7 @@ def test_draw_predictions_pastes_only_positive_nms_queries(monkeypatch):
     assert paste_query_counts == [1]
     assert paste_image_sizes == [(80, 100)]
     assert torch.allclose(
-        pasted_boxes[0], torch.tensor([[30.0, 24.0, 70.0, 56.0]])
+        pasted_boxes[0], torch.tensor([[21.25, 21.6, 78.75, 58.4]]), atol=1e-5
     )
     assert len(mask_images) == 1
     assert mask_images[0].shape == (80, 100)

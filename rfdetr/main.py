@@ -158,6 +158,9 @@ class Model:
         self.postprocess = PostProcess(
             num_select=args.num_select,
             segmentation_mode=getattr(args, 'segmentation_mode', 'full_image'),
+            segmentation_crop_box_scale=getattr(
+                args, 'segmentation_crop_box_scale', 1.15
+            ),
         )
         self.stop_early = False
     

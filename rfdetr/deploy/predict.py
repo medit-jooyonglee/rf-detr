@@ -39,9 +39,9 @@ from rfdetr.config import (
 from rfdetr.engine import draw_preditions_boxes
 
 g_rfdetr_model = None
-MASK_PROBABILITY_THRESHOLD = 0.6
+MASK_PROBABILITY_THRESHOLD = 0.5
 
-def main(use_ema=True):
+def main(use_ema=True, with_source_concat=False):
     # FIXME: save_path
     from trainer import diskmanager, image_utils
     save_dir = f'results/test/0828'
@@ -67,11 +67,29 @@ def main(use_ema=True):
         return size
     
     def resize_image(image, stride=64, target_width=640):
-        # size = get_image_size(image.shape[:2], stride=stride)
+        """Match ResizeCocoSample's keep-ratio letterbox used for CBCT training."""
         size = get_target_image_size(image.shape[:2], rererence_width=target_width)
         size = get_image_size(size, stride=stride)
-        # return image.resize(size, Image.BILINEAR)
-        return cv2.resize(image, tuple(size[::-1]), interpolation=cv2.INTER_LINEAR)
+        target_h, target_w = size
+        src_h, src_w = image.shape[:2]
+        scale = min(target_w / src_w, target_h / src_h)
+        resized_w = int(round(src_w * scale))
+        resized_h = int(round(src_h * scale))
+        resized = cv2.resize(
+            image, (resized_w, resized_h), interpolation=cv2.INTER_LINEAR
+        )
+        offset_x = (target_w - resized_w) // 2
+        offset_y = (target_h - resized_h) // 2
+        canvas_shape = (target_h, target_w, *image.shape[2:])
+        canvas = np.zeros(canvas_shape, dtype=image.dtype)
+        canvas[offset_y:offset_y + resized_h, offset_x:offset_x + resized_w] = resized
+        content_box = (
+            offset_x,
+            offset_y,
+            offset_x + resized_w,
+            offset_y + resized_h,
+        )
+        return canvas, content_box
 
         # ''
         
@@ -87,7 +105,7 @@ def main(use_ema=True):
     # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_0824/JPEGImages/'
     # path = 
     
-    mask_save_dir = 'E:/dataset/reverse_tomosynthesis/cbct_ios_dcm_mask_results_0828_testestt'
+    mask_save_dir = 'E:/dataset/reverse_tomosynthesis/cbct_ios_dcm_mask_results_0828_testestt222_merge222'
     found = diskmanager.deep_search_files(path, exts=['.jpg', '.jpeg'])
     # found = glob.glob(f'{path}/*.jpg')
     i_break = 30
@@ -96,7 +114,7 @@ def main(use_ema=True):
             # break
         # img = cv2.imread(file, cv2.IMREAD_GRAYSCALE)
         img = image_utils.cv2_imread(file, flags=cv2.IMREAD_GRAYSCALE)
-        rsz_img = resize_image(img, stride=64)
+        rsz_img, input_content_box = resize_image(img, stride=64)
         img2 = np.repeat(rsz_img[None], 3, axis=0) / 255.
 
         img_tensor = torch_utils.data_convert(img2[None])
@@ -113,7 +131,10 @@ def main(use_ema=True):
                     img_tensor, outputs, save=False, origin_size=img.shape[:2],
                                         segmentation_mode='crop_and_resize',
                     mask_probability_threshold=MASK_PROBABILITY_THRESHOLD,
+                    segmentation_crop_box_scale=1.15,
+                    with_source_concat=with_source_concat,
                     paste_masks_at_original_size=True,
+                    input_content_box=input_content_box,
                 )
                 
                 
@@ -147,7 +168,7 @@ def init_and_get_model(config=None, device='cuda', export=False, use_ema=True):
             # num_queries=100,
             num_queries=100,
             group_detr=5,
-            num_select=30,
+            num_select=35,
             encoder='dinov2_windowed_tiny',
             # encoder='dinov2_windowed_base',
             
@@ -160,12 +181,17 @@ def init_and_get_model(config=None, device='cuda', export=False, use_ema=True):
             segmentation_mode='crop_and_resize',
             segmentation_crop_size=(128, 64),
             coarse_hint_scale=0.35,
+            segmentation_crop_box_scale=1.15,
+            coarse_hint_dropout=0.30,
 
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
-            pretrain_weights='e:/temp/checkpoint.pth',
+            # pretrain_weights='e:/temp/checkpoint.pth',
             
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_0819_all/checkpoint.pth',
-            # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_0819_crop_retrain/checkpoint.pth',
+            # # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_0819_crop_retrain/checkpoint.pth',
+            # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_crop_regularization/checkpoint.pth',
+            # pretrain_weights='output/bounding_bbox/checkpoint.pth',
+            pretrain_weights='output/bounding_bbox_regularization/checkpoint.pth',
             # 'output/xray_teeth33_dinov2tiny_small_seg_crop_retrain'
             # 'output/xray_teeth33_dinov2tiny_small_seg_0819_all/eval'
             **config,
@@ -361,7 +387,10 @@ def test_coreml_inference():
             input_tensor,
             res_dicts,
             save=True,
-            save_dir='outputs/resulst/export'
+            save_dir='outputs/resulst/export',
+            segmentation_mode='crop_and_resize',
+            mask_probability_threshold=MASK_PROBABILITY_THRESHOLD,
+            segmentation_crop_box_scale=1.15,
         )
         
  
@@ -427,7 +456,10 @@ def inference_libtorch_model_main():
             save=save,
             save_dir='outputs/export/',
             fname=os.path.relpath(file, path),
-            origin_size=origin_size
+            origin_size=origin_size,
+            segmentation_mode='crop_and_resize',
+            mask_probability_threshold=MASK_PROBABILITY_THRESHOLD,
+            segmentation_crop_box_scale=1.15,
         )
         assert len(mask_iamge) == 1, "Expected a single mask image."
         savename = os.path.join(mask_save_dir, os.path.relpath(file, path))
@@ -447,8 +479,15 @@ if __name__ == '__main__':
         default=True,
         help='Use ema_model weights from the checkpoint (default: enabled).',
     )
+    parser.add_argument(
+        '--with-source-concat',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='Concatenate source image with output for visualization (default: disabled).',
+    )
     cli_args = parser.parse_args()
-    main(use_ema=cli_args.use_ema)
+    main(use_ema=cli_args.use_ema,
+         with_source_concat=cli_args.with_source_concat)
     # export_libtorch('outputs/temp.pt')
     # coreml_export_main()
     # test_coreml_inference()
