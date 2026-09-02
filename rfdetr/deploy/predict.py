@@ -41,7 +41,7 @@ from rfdetr.engine import draw_preditions_boxes
 g_rfdetr_model = None
 MASK_PROBABILITY_THRESHOLD = 0.6
 
-def main(use_ema=True):
+def main(use_ema=True, with_source_concat=False):
     # FIXME: save_path
     from trainer import diskmanager, image_utils
     save_dir = f'results/test/0828'
@@ -112,6 +112,8 @@ def main(use_ema=True):
                     img_tensor, outputs, save=True, save_dir=save_dir,
                     segmentation_mode='crop_and_resize',
                     mask_probability_threshold=MASK_PROBABILITY_THRESHOLD,
+                    segmentation_crop_box_scale=1.15,
+                    with_source_concat=with_source_concat
                 )
             except Exception as e:
                 print(e)
@@ -147,12 +149,16 @@ def init_and_get_model(config=None, device='cuda', export=False, use_ema=True):
             segmentation_mode='crop_and_resize',
             segmentation_crop_size=(128, 64),
             coarse_hint_scale=0.35,
+            segmentation_crop_box_scale=1.15,
+            coarse_hint_dropout=0.30,
 
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg/checkpoint0499.pth'
             # pretrain_weights='e:/temp/checkpoint.pth'
             
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_0819_all/checkpoint.pth',
-            pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_crop_retrain/checkpoint.pth',
+            # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_crop_retrain/checkpoint.pth',
+            # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_crop_regularization/checkpoint.pth',
+            pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_crop_regularization/checkpoint.pth',
             # 'output/xray_teeth33_dinov2tiny_small_seg_crop_retrain'
             # 'output/xray_teeth33_dinov2tiny_small_seg_0819_all/eval'
             **config,
@@ -348,7 +354,10 @@ def test_coreml_inference():
             input_tensor,
             res_dicts,
             save=True,
-            save_dir='outputs/resulst/export'
+            save_dir='outputs/resulst/export',
+            segmentation_mode='crop_and_resize',
+            mask_probability_threshold=MASK_PROBABILITY_THRESHOLD,
+            segmentation_crop_box_scale=1.15,
         )
         
  
@@ -412,7 +421,10 @@ def inference_libtorch_model_main():
             res_dicts,
             save=save,
             save_dir='outputs/export/',
-            fname=os.path.relpath(file, path)
+            fname=os.path.relpath(file, path),
+            segmentation_mode='crop_and_resize',
+            mask_probability_threshold=MASK_PROBABILITY_THRESHOLD,
+            segmentation_crop_box_scale=1.15,
         )
         assert len(mask_iamge) == 1, "Expected a single mask image."
         savename = os.path.join(mask_save_dir, os.path.relpath(file, path))
@@ -432,10 +444,17 @@ if __name__ == '__main__':
         default=True,
         help='Use ema_model weights from the checkpoint (default: enabled).',
     )
+    parser.add_argument(
+        '--with-source-concat',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='Concatenate source image with output for visualization (default: disabled).',
+    )
     cli_args = parser.parse_args()
-    main(use_ema=cli_args.use_ema)
+    main(use_ema=cli_args.use_ema,
+         with_source_concat=cli_args.with_source_concat)
     # export_libtorch('outputs/temp.pt')
     # coreml_export_main()
     # test_coreml_inference()
     # inference_libtorch_model_main()
-# 
+#

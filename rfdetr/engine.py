@@ -283,7 +283,17 @@ def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=N
             outputs = model(samples)
             
             if getattr(args, 'eval_save', False):
-                draw_preditions_boxes(samples, outputs, save=True)
+                draw_preditions_boxes(
+                    samples,
+                    outputs,
+                    save=True,
+                    segmentation_mode=getattr(
+                        args, 'segmentation_mode', 'full_image'
+                    ),
+                    segmentation_crop_box_scale=getattr(
+                        args, 'segmentation_crop_box_scale', 1.15
+                    ),
+                )
 
         if args.fp16_eval:
             for key in outputs.keys():
@@ -419,6 +429,8 @@ def draw_preditions_boxes(
     fname='',
     segmentation_mode='full_image',
     mask_probability_threshold=0.5,
+    segmentation_crop_box_scale=1.15,
+    with_source_concat=False
 ):
     from trainer import torch_utils
     from rfdetr.datasets.teeth import draw_bboxes
@@ -440,7 +452,17 @@ def draw_preditions_boxes(
         inputs_arrays  = torch_utils.to_numpy(new_samples.tensors)
     elif isinstance(new_samples, torch.Tensor):
         inputs_arrays  = torch_utils.to_numpy(new_samples)
-    boxes = torch_utils.to_numpy(outputs['pred_boxes'])
+    normalized_boxes = outputs['pred_boxes']
+    boxes = torch_utils.to_numpy(normalized_boxes)
+    mask_boxes = boxes
+    if segmentation_mode == 'crop_and_resize':
+        from rfdetr.models.segmentation_head import expand_normalized_boxes
+        mask_boxes = torch_utils.to_numpy(
+            expand_normalized_boxes(
+                normalized_boxes,
+                segmentation_crop_box_scale,
+            )
+        )
     probs = outputs['pred_logits'].sigmoid()
     probs = torch_utils.to_numpy(probs.to(torch.float32))
     
@@ -448,21 +470,25 @@ def draw_preditions_boxes(
     # posit = pred_scores[i] > threshold
     # (batch, num_queries, 4) 
     boxes = denorm_boxes_to_xyxy(boxes, width, height)
+    mask_boxes = denorm_boxes_to_xyxy(mask_boxes, width, height)
     # logits = torch_utils.to_numpy(outputs['pred_logits'].to(torch.float32))
     pred_scores = np.max(probs, axis=-1)
     pred_label = np.argmax(probs, axis=-1)
     
     pred_masks = outputs.get('pred_masks')
+    confidence_threshold = 0.5
+    
     if pred_masks is not None:
         if segmentation_mode == 'crop_and_resize':
             from rfdetr.models.segmentation_head import paste_masks_in_image
             pasted_masks = []
             for batch_index in range(pred_masks.shape[0]):
+                posit = (pred_scores[batch_index] > confidence_threshold) & (pred_label[batch_index] > 0)
                 pasted_masks.append(
                     paste_masks_in_image(
                         pred_masks[batch_index],
                         torch.as_tensor(
-                            boxes[batch_index],
+                            mask_boxes[batch_index],
                             device=pred_masks.device,
                         ),
                         tuple(inputs_arrays.shape[-2:]),
@@ -486,7 +512,6 @@ def draw_preditions_boxes(
         )
     else:
         pred_masks_label = None
-    confidence_threshold = 0.5
     if nms_refinement:
         nms_bboxes = []
         nms_labels = []
@@ -495,6 +520,7 @@ def draw_preditions_boxes(
         
         for ib in range(boxes.shape[0]):
             posit = (pred_scores[ib] > confidence_threshold) & (pred_label[ib] > 0)
+            
             # print(posit.sum())
         
             keep_indices = non_max_suppression(boxes[ib][posit], pred_scores[ib][posit], threshold=0.4)
@@ -571,7 +597,7 @@ def draw_preditions_boxes(
         boxes_xy = posit_boxes
         # boxes_xy = 
         
-        
+        src_image = image.copy()
         
         # t_boxes_xy = torch_utils.data_convert(boxes_xy)
         # iou, _ = box_ops.box_iou(t_boxes_xy, t_boxes_xy)
@@ -585,6 +611,9 @@ def draw_preditions_boxes(
             color_label_image = colors[restore_label_image]
             # image_utils.
             image = utils_numpy.apply_blending_mask(image, color_label_image)
+            if with_source_concat:
+                image = np.concatenate([src_image, image], axis=1)
+                
         res_images.append(image)
 
         if save:
@@ -600,4 +629,3 @@ def draw_preditions_boxes(
             image_utils.cv2_imwrite(save_name, image.astype(np.uint8)[..., ::-1])
             print("Saved image with bounding boxes to: ", save_name)
     return res_images, mask_images
-        

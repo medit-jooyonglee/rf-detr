@@ -20,6 +20,26 @@ def scale_coarse_probability_hint(
     return (2.0 * coarse_probability - 1.0) * scale
 
 
+def expand_normalized_boxes(
+    boxes: torch.Tensor,
+    scale: float = 1.15,
+) -> torch.Tensor:
+    """Expand normalized cxcywh boxes while keeping them inside the image."""
+    if scale < 1.0:
+        raise ValueError("segmentation_crop_box_scale must be at least 1.")
+    cx, cy, width, height = boxes.unbind(-1)
+    half_width = 0.5 * width * scale
+    half_height = 0.5 * height * scale
+    x0 = (cx - half_width).clamp(0.0, 1.0)
+    y0 = (cy - half_height).clamp(0.0, 1.0)
+    x1 = (cx + half_width).clamp(0.0, 1.0)
+    y1 = (cy + half_height).clamp(0.0, 1.0)
+    return torch.stack(
+        ((x0 + x1) * 0.5, (y0 + y1) * 0.5, x1 - x0, y1 - y0),
+        dim=-1,
+    )
+
+
 def _crop_grid(boxes: torch.Tensor, output_size: tuple[int, int]) -> torch.Tensor:
     """Build a grid_sample grid for normalized cxcywh boxes."""
     crop_h, crop_w = output_size

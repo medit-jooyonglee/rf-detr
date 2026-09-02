@@ -40,6 +40,7 @@ from rfdetr.models.segmentation_head import (
     SegmentationHead,
     crop_instance_masks,
     crop_tensor_by_boxes,
+    expand_normalized_boxes,
     get_uncertain_point_coords_with_randomness,
     paste_masks_in_image,
     point_sample,
@@ -62,7 +63,9 @@ class LWDETR(nn.Module):
                  bbox_reparam=False,
                  segmentation_mode='full_image',
                  segmentation_crop_size=(128, 64),
-                 coarse_hint_scale=0.35):
+                 coarse_hint_scale=0.35,
+                 segmentation_crop_box_scale=1.15,
+                 coarse_hint_dropout=0.30):
         """ Initializes the model.
         Parameters:
             backbone: torch module of the backbone to be used. See backbone.py
@@ -83,6 +86,12 @@ class LWDETR(nn.Module):
         self.segmentation_mode = segmentation_mode
         self.segmentation_crop_size = tuple(segmentation_crop_size)
         self.coarse_hint_scale = float(coarse_hint_scale)
+        self.segmentation_crop_box_scale = float(segmentation_crop_box_scale)
+        self.coarse_hint_dropout = float(coarse_hint_dropout)
+        if not 0.0 <= self.coarse_hint_dropout < 1.0:
+            raise ValueError("coarse_hint_dropout must be in [0, 1).")
+        if self.segmentation_crop_box_scale < 1.0:
+            raise ValueError("segmentation_crop_box_scale must be at least 1.")
         self.segmentation_head = segmentation_head
         self.segmentation_refinement_head = segmentation_refinement_head
         
@@ -138,6 +147,17 @@ class LWDETR(nn.Module):
                 enc_out_class_embed.bias.data = enc_out_class_embed.bias.data.repeat(num_repeats)
                 enc_out_class_embed.bias.data = enc_out_class_embed.bias.data[:num_classes]
 
+    def _prepare_coarse_hint(self, probability: torch.Tensor) -> torch.Tensor:
+        hint = scale_coarse_probability_hint(probability, self.coarse_hint_scale)
+        if not self.training or self.coarse_hint_dropout == 0.0:
+            return hint
+        keep = torch.rand(
+            (hint.shape[0], 1, 1, 1),
+            device=hint.device,
+            dtype=hint.dtype,
+        ) >= self.coarse_hint_dropout
+        return hint * keep
+
     def _predict_crop_masks(
         self,
         images: torch.Tensor,
@@ -154,20 +174,18 @@ class LWDETR(nn.Module):
                 valid_h = int(valid.any(dim=1).sum().item())
                 valid_w = int(valid.any(dim=0).sum().item())
                 image = image[:, :valid_h, :valid_w]
-            image_boxes = image_boxes.detach().clamp(0.0, 1.0)
+            image_boxes = expand_normalized_boxes(image_boxes.detach(), self.segmentation_crop_box_scale)
             image_crops = crop_tensor_by_boxes(
                 image[None],
                 image_boxes[None],
                 self.segmentation_crop_size,
             )[0]
             probability_crops = crop_instance_masks(
-                image_coarse_masks.sigmoid(),
+                image_coarse_masks.detach().sigmoid(),
                 image_boxes,
                 self.segmentation_crop_size,
             )[:, None]
-            probability_crops = scale_coarse_probability_hint(
-                probability_crops, self.coarse_hint_scale
-            )
+            probability_crops = self._prepare_coarse_hint(probability_crops)
             refinement_input = torch.cat((image_crops, probability_crops), dim=1)
             refined_chunks = [
                 self.segmentation_refinement_head(chunk)
@@ -206,19 +224,18 @@ class LWDETR(nn.Module):
                 selected_queries = (pairwise_iou + 0.25 * class_scores).argmax(dim=0)
 
             selected_coarse_masks = image_coarse_masks[selected_queries]
+            crop_boxes = expand_normalized_boxes(boxes, self.segmentation_crop_box_scale)
             image_crops = crop_tensor_by_boxes(
                 image[None],
-                boxes[None],
+                crop_boxes[None],
                 self.segmentation_crop_size,
             )[0]
             probability_crops = crop_instance_masks(
-                selected_coarse_masks.sigmoid(),
-                boxes,
+                selected_coarse_masks.detach().sigmoid(),
+                crop_boxes,
                 self.segmentation_crop_size,
             )[:, None]
-            probability_crops = scale_coarse_probability_hint(
-                probability_crops, self.coarse_hint_scale
-            )
+            probability_crops = self._prepare_coarse_hint(probability_crops)
             refinement_input = torch.cat((image_crops, probability_crops), dim=1)
             logits_per_image.append(
                 self.segmentation_refinement_head(refinement_input)
@@ -453,7 +470,8 @@ class SetCriterion(nn.Module):
                 ia_bce_loss=False,
                 mask_point_sample_ratio: int = 16,
                 segmentation_mode: str = 'full_image',
-                segmentation_crop_size=(128, 64)):
+                segmentation_crop_size=(128, 64),
+                segmentation_crop_box_scale=1.15):
         """ Create the criterion.
         Parameters:
             num_classes: number of object categories, omitting the special no-object category
@@ -475,6 +493,7 @@ class SetCriterion(nn.Module):
         self.use_position_supervised_loss = use_position_supervised_loss
         self.segmentation_mode = segmentation_mode
         self.segmentation_crop_size = tuple(segmentation_crop_size)
+        self.segmentation_crop_box_scale = float(segmentation_crop_box_scale)
         self.ia_bce_loss = ia_bce_loss
         self.mask_point_sample_ratio = mask_point_sample_ratio
 
@@ -619,9 +638,12 @@ class SetCriterion(nn.Module):
         crop_logits = []
         crop_targets = []
         for logits, target in zip(logits_per_image, targets):
+            target_crop_boxes = expand_normalized_boxes(
+                target['boxes'], self.segmentation_crop_box_scale
+            )
             target_crops = crop_instance_masks(
                 target['masks'],
-                target['boxes'],
+                target_crop_boxes,
                 self.segmentation_crop_size,
             )
             if logits.shape != target_crops.shape:
@@ -638,6 +660,7 @@ class SetCriterion(nn.Module):
                 'loss_mask_refine_ce': zero,
                 'loss_mask_refine_dice': zero,
                 'loss_mask_refine_boundary': zero,
+                'loss_mask_refine_outer': zero,
             }
 
         src_masks = torch.cat(crop_logits, dim=0)
@@ -658,17 +681,23 @@ class SetCriterion(nn.Module):
             dilated = F.max_pool2d(target_4d, kernel_size=5, stride=1, padding=2)
             eroded = -F.max_pool2d(-target_4d, kernel_size=5, stride=1, padding=2)
             boundary = (dilated - eroded).clamp(0, 1)[:, 0]
+            outer_ring = (dilated - target_4d).clamp(0, 1)[:, 0]
         boundary_bce = F.binary_cross_entropy_with_logits(
             src_masks, target_masks, reduction='none'
         )
         loss_mask_refine_boundary = (
             boundary_bce * (1.0 + 4.0 * boundary)
         ).mean(dim=(1, 2)).mean()
+        loss_mask_refine_outer = (
+            (boundary_bce * outer_ring).sum(dim=(1, 2))
+            / outer_ring.sum(dim=(1, 2)).clamp_min(1.0)
+        ).mean()
 
         return {
             'loss_mask_refine_ce': loss_mask_refine_ce,
             'loss_mask_refine_dice': loss_mask_refine_dice,
             'loss_mask_refine_boundary': loss_mask_refine_boundary,
+            'loss_mask_refine_outer': loss_mask_refine_outer,
         }
 
     def loss_masks(self, outputs, targets, indices, num_boxes):
@@ -957,10 +986,12 @@ def calculate_uncertainty(logits):
 
 class PostProcess(nn.Module):
     """ This module converts the model's output into the format expected by the coco api"""
-    def __init__(self, num_select=300, segmentation_mode='full_image') -> None:
+    def __init__(self, num_select=300, segmentation_mode='full_image',
+                 segmentation_crop_box_scale=1.15) -> None:
         super().__init__()
         self.num_select = num_select
         self.segmentation_mode = segmentation_mode
+        self.segmentation_crop_box_scale = float(segmentation_crop_box_scale)
 
     @torch.no_grad()
     def forward(self, outputs, target_sizes):
@@ -983,12 +1014,17 @@ class PostProcess(nn.Module):
         topk_boxes = topk_indexes // out_logits.shape[2]
         labels = topk_indexes % out_logits.shape[2]
         boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
+        mask_boxes = box_ops.box_cxcywh_to_xyxy(
+            expand_normalized_boxes(out_bbox, self.segmentation_crop_box_scale)
+        ) if self.segmentation_mode == 'crop_and_resize' else boxes
         boxes = torch.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1,1,4))
+        mask_boxes = torch.gather(mask_boxes, 1, topk_boxes.unsqueeze(-1).repeat(1,1,4))
 
         # and from relative [0, 1] to absolute [0, height] coordinates
         img_h, img_w = target_sizes.unbind(1)
         scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1)
         boxes = boxes * scale_fct[:, None, :]
+        mask_boxes = mask_boxes * scale_fct[:, None, :]
 
         # Optionally gather masks corresponding to the same top-K queries and resize to original size
         results = []
@@ -1001,7 +1037,7 @@ class PostProcess(nn.Module):
                 if self.segmentation_mode == 'crop_and_resize':
                     masks_i = paste_masks_in_image(
                         masks_i,
-                        boxes[i],
+                        mask_boxes[i],
                         (int(h), int(w)),
                     )[:, None]
                 else:
@@ -1086,6 +1122,8 @@ def build_model(args):
         getattr(args, 'segmentation_crop_size', (128, 64))
     )
     coarse_hint_scale = getattr(args, 'coarse_hint_scale', 0.35)
+    segmentation_crop_box_scale = getattr(args, 'segmentation_crop_box_scale', 1.15)
+    coarse_hint_dropout = getattr(args, 'coarse_hint_dropout', 0.30)
     if not args.segmentation_head:
         segmentation_head = None
         segmentation_refinement_head = None
@@ -1106,6 +1144,8 @@ def build_model(args):
         transformer,
         segmentation_head,
         segmentation_refinement_head,
+        segmentation_crop_box_scale=segmentation_crop_box_scale,
+        coarse_hint_dropout=coarse_hint_dropout,
         coarse_hint_scale=coarse_hint_scale,
         num_classes=num_classes,
         num_queries=args.num_queries,
@@ -1124,6 +1164,9 @@ def build_criterion_and_postprocessors(args):
     segmentation_mode = getattr(args, 'segmentation_mode', 'full_image')
     segmentation_crop_size = tuple(
         getattr(args, 'segmentation_crop_size', (128, 64))
+    )
+    segmentation_crop_box_scale = getattr(
+        args, 'segmentation_crop_box_scale', 1.15
     )
     matcher = build_matcher(args)
     weight_dict = {'loss_ce': args.cls_loss_coef, 'loss_bbox': args.bbox_loss_coef}
@@ -1146,6 +1189,9 @@ def build_criterion_and_postprocessors(args):
         weight_dict['loss_mask_refine_boundary'] = getattr(
             args, 'mask_boundary_loss_coef', 2.0
         )
+        weight_dict['loss_mask_refine_outer'] = getattr(
+            args, 'refine_outer_boundary_loss_coef', 4.0
+        )
 
     losses = ['labels', 'boxes', 'cardinality']
     if args.segmentation_head:
@@ -1164,7 +1210,8 @@ def build_criterion_and_postprocessors(args):
                                 ia_bce_loss=args.ia_bce_loss,
                                 mask_point_sample_ratio=args.mask_point_sample_ratio,
                                 segmentation_mode=segmentation_mode,
-                                segmentation_crop_size=segmentation_crop_size)
+                                segmentation_crop_size=segmentation_crop_size,
+                                segmentation_crop_box_scale=segmentation_crop_box_scale)
     else:
         criterion = SetCriterion(args.num_classes + 1, matcher=matcher, weight_dict=weight_dict,
                                 focal_alpha=args.focal_alpha, losses=losses, 
@@ -1176,6 +1223,7 @@ def build_criterion_and_postprocessors(args):
     postprocess = PostProcess(
         num_select=args.num_select,
         segmentation_mode=segmentation_mode,
+        segmentation_crop_box_scale=segmentation_crop_box_scale,
     )
 
     return criterion, postprocess
