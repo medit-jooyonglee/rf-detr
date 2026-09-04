@@ -79,6 +79,11 @@ def crop_tensor_by_boxes(
 
     source = tensor[:, None].expand(-1, num_boxes, -1, -1, -1)
     source = source.reshape(batch_size * num_boxes, channels, *tensor.shape[-2:])
+    # grid_sample requires its input and grid to have the same floating dtype.
+    # In particular, exported FP16 models produce FP16 boxes while training
+    # targets are commonly FP32.  Build the grid in the tensor's dtype so both
+    # paths remain valid.
+    boxes = boxes.to(device=tensor.device, dtype=tensor.dtype)
     grid = _crop_grid(boxes, output_size).reshape(
         batch_size * num_boxes, crop_h, crop_w, 2
     )
@@ -98,10 +103,15 @@ def crop_instance_masks(
     output_size: tuple[int, int] = (128, 64),
 ) -> torch.Tensor:
     """Crop each NxHxW instance mask with its corresponding Nx4 box."""
+    output_dtype = masks.dtype if masks.is_floating_point() else torch.float32
     if masks.shape[0] == 0:
-        return masks.new_empty((0, *output_size), dtype=torch.float32)
+        return masks.new_empty((0, *output_size), dtype=output_dtype)
+    # Preserve floating-point precision for FP16 export. Integer/bool target
+    # masks still need conversion because grid_sample only accepts floating
+    # inputs.
+    sampling_masks = masks if masks.is_floating_point() else masks.float()
     crops = crop_tensor_by_boxes(
-        masks[:, None].float(),
+        sampling_masks[:, None],
         boxes[:, None].detach(),
         output_size,
     )

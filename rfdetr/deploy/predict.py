@@ -20,10 +20,8 @@ import rfdetr.util.misc as utils
 from rfdetr.util.utils import clean_state_dict
 import rfdetr.datasets.transforms as T
 from rfdetr.models import build_model
-# from rfdetr.deploy._onnx import OnnxOptimizer
-import re
-import sys
 from rfdetr import RFDETRBase, RFDETRNano, RFDETRSmall
+from trainer import torch_utils
 
 from rfdetr.config import (
     RFDETRLargeConfig,
@@ -40,6 +38,60 @@ from rfdetr.engine import draw_preditions_boxes
 
 g_rfdetr_model = None
 MASK_PROBABILITY_THRESHOLD = 0.5
+EXPORT_FIX_SIZE = (384, 704)
+
+def get_target_image_size(image_shape, rererence_width:int = 640):
+    ih, iw = image_shape[:2]
+    multiple = 16
+    
+    scale = rererence_width / iw
+    # else:
+        # scale = 
+    # ih = (ih * scale + multiple - 1) // multiple * multiple
+    ih = int(np.ceil(ih * scale / multiple) * multiple)
+    return (ih, rererence_width)
+    
+
+def get_image_size(shape, stride=64):
+    h0, w0 = shape
+    size = (h0 // stride + 1) * stride, (w0 // stride + 1) * stride
+    return size
+
+
+def resize_image(image, stride=64, target_width=640, resize_hw=None):
+    """Letterbox an image, optionally to an exact export size in (H, W)."""
+    if resize_hw is None:
+        size = get_target_image_size(
+            image.shape[:2], rererence_width=target_width
+        )
+        target_h, target_w = get_image_size(size, stride=stride)
+    else:
+        if len(resize_hw) != 2:
+            raise ValueError("resize_hw must contain exactly (height, width).")
+        target_h, target_w = (int(value) for value in resize_hw)
+        if target_h <= 0 or target_w <= 0:
+            raise ValueError("resize_hw dimensions must be positive.")
+
+    src_h, src_w = image.shape[:2]
+    scale = min(target_w / src_w, target_h / src_h)
+    resized_w = int(round(src_w * scale))
+    resized_h = int(round(src_h * scale))
+    resized = cv2.resize(
+        image, (resized_w, resized_h), interpolation=cv2.INTER_LINEAR
+    )
+    offset_x = (target_w - resized_w) // 2
+    offset_y = (target_h - resized_h) // 2
+    canvas_shape = (target_h, target_w, *image.shape[2:])
+    canvas = np.zeros(canvas_shape, dtype=image.dtype)
+    canvas[offset_y:offset_y + resized_h, offset_x:offset_x + resized_w] = resized
+    content_box = (
+        offset_x,
+        offset_y,
+        offset_x + resized_w,
+        offset_y + resized_h,
+    )
+    return canvas, content_box
+
 
 def main(use_ema=True, with_source_concat=False):
     # FIXME: save_path
@@ -49,48 +101,6 @@ def main(use_ema=True, with_source_concat=False):
     
     # model = rf_detr.model.model
     
-    def get_target_image_size(image_shape, rererence_width:int = 640):
-        ih, iw = image_shape[:2]
-        multiple = 16
-        
-        scale = rererence_width / iw
-        # else:
-            # scale = 
-        # ih = (ih * scale + multiple - 1) // multiple * multiple
-        ih = int(np.ceil(ih * scale / multiple) * multiple)
-        return (ih, rererence_width)
-        
-
-    def get_image_size(shape, stride=64):
-        h0, w0 = shape
-        size = (h0 // stride + 1) * stride, (w0 // stride + 1) * stride
-        return size
-    
-    def resize_image(image, stride=64, target_width=640):
-        """Match ResizeCocoSample's keep-ratio letterbox used for CBCT training."""
-        size = get_target_image_size(image.shape[:2], rererence_width=target_width)
-        size = get_image_size(size, stride=stride)
-        target_h, target_w = size
-        src_h, src_w = image.shape[:2]
-        scale = min(target_w / src_w, target_h / src_h)
-        resized_w = int(round(src_w * scale))
-        resized_h = int(round(src_h * scale))
-        resized = cv2.resize(
-            image, (resized_w, resized_h), interpolation=cv2.INTER_LINEAR
-        )
-        offset_x = (target_w - resized_w) // 2
-        offset_y = (target_h - resized_h) // 2
-        canvas_shape = (target_h, target_w, *image.shape[2:])
-        canvas = np.zeros(canvas_shape, dtype=image.dtype)
-        canvas[offset_y:offset_y + resized_h, offset_x:offset_x + resized_w] = resized
-        content_box = (
-            offset_x,
-            offset_y,
-            offset_x + resized_w,
-            offset_y + resized_h,
-        )
-        return canvas, content_box
-
         # ''
         
         # next(rf_detr.model.model.parameters()).device
@@ -105,7 +115,7 @@ def main(use_ema=True, with_source_concat=False):
     # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_0824/JPEGImages/'
     # path = 
     
-    mask_save_dir = 'E:/dataset/reverse_tomosynthesis/cbct_ios_dcm_mask_results_0828_testestt222_merge222_prob'
+    mask_save_dir = 'E:/temp/test_cbct_ios'
     found = diskmanager.deep_search_files(path, exts=['.jpg', '.jpeg'])
     # found = glob.glob(f'{path}/*.jpg')
     i_break = 30
@@ -239,13 +249,15 @@ def init_and_get_model(config=None, device='cuda', export=False, use_ema=True):
                     masks = res['pred_masks']
                 else:
                     bboxes, logits, masks = res
-                # return bboxes, logits, masks
-                probs = logits.sigmoid()
-                bboxes, probs, masks = [torch.squeeze(v) for v in (bboxes, probs, masks)]
-                label = probs.argmax(dim=-1)
-                # posit = label > 0
-                res = [bboxes, probs, masks, label]
-                return res
+                # # return bboxes, logits, masks
+                # # not change ...drawing-bounding-box opiont
+                # probs = logits.sigmoid()
+                # bboxes, probs, masks = [torch.squeeze(v) for v in (bboxes, probs, masks)]
+                # label = probs.argmax(dim=-1)
+                # # posit = label > 0
+                # res = [bboxes, probs, masks, label]
+                # return res
+                return bboxes, logits, masks
                 # # res = bboxes[posit], probs[posit],  masks[posit].to(torch.float32), label[posit]
                 # keys = [
                 #     'pred_boxes',
@@ -273,29 +285,21 @@ def init_and_get_model(config=None, device='cuda', export=False, use_ema=True):
                 
     return g_rfdetr_model
     
-# def export_libtorch():
-#     pass
-#     model = init_and_get_model({})
-#     x0 = torch.randn(1, 3, 64*5, 64*10).cuda()
-#     res = torch.jit.trace(
-#         model,)
-#         # torch.randn(1, 3, 224, 224).cuda()
-    
-    
+
     
     # model.to()
-def export_libtorch(output_path='e:/temp/model_libtorch.pt', shape=(384, 704)):
-    model = init_and_get_model({})
+def export_libtorch(output_path='e:/temp/model_libtorch.pt', shape=(384, 704), dtype=torch.float16):
+    model = init_and_get_model(export=True)
     model.eval()
     model.requires_grad_(False)
     # dtype = torch.float16
-    dtype = torch.float16
+    
     # model.half()
     model.to(dtype)
     # model
     # model.export()  # swap in forward_export + baked position embeddings (required before tracing)
 
-    dummy = torch.randn(1, 3, *shape).cuda().half() #.cuda()
+    dummy = torch.randn(1, 3, *shape).cuda().to(dtype)
     # model(dummy)  # run once to ensure any lazy modules are initialized
     with torch.no_grad():
         traced = torch.jit.trace(model, dummy, check_trace=False)
@@ -423,73 +427,88 @@ def inference_libtorch_model_main():
     for file in found:
         # img = cv2.imread(file, cv2.IMREAD_GRAYSCALE)
         img = image_utils.cv2_imread(file, flags=cv2.IMREAD_GRAYSCALE)
-        shape = img.shape[:2]
-        if np.all([np.all(shape > np.array(size0)) for size0 in filter_image_size]):
+        
+        darwing, mask = predict_wrapper(img, model=model)
+        
+        # cv2.imwrite(f'temp/{os.path.basename(file)}', darwing.astype(np.uint8))
+        image_utils.cv2_imwrite(f'temp/mask_{os.path.basename(file)}', darwing.astype(np.uint8)[..., ::-1])
+        # shape = img.shape[:2]
+        
+
+
+def predict_wrapper(img, model=None):
+    if model is None:
+        model = init_and_get_model(export=False, use_ema=True)
+    if img.ndim ==3:
+        # simple gray image as pickking first channel
+        img = img[..., 0]
+    if isinstance(model, torch.jit.ScriptModule):
+        # export model
+        rsz_img, input_content_box = resize_image(img, stride=64, resize_hw=EXPORT_FIX_SIZE)
+    else:
+        rsz_img, input_content_box = resize_image(img, stride=64)
+    img2 = np.repeat(rsz_img[None], 3, axis=0) / 255.
+
+    model_parameter = next(model.parameters(), None)
+    convert_options = {}
+    if model_parameter is not None:
+        convert_options = {
+            'device': model_parameter.device,
+            'dtype': model_parameter.dtype,
+        }
+    img_tensor = torch_utils.data_convert(img2[None], **convert_options)
+    
+    with torch.no_grad():
+        outputs = model(img_tensor)
+        # protocol export model or vanila modell, vanila model return dict, export model return tuple
+        if isinstance(outputs, dict):
             pass
         else:
-            print(f"Skipping file {file} due to size {shape}.")
-            continue
-        # size = get_size(img.shape[:2], refenrece_width=640, stride=64)
-        size = (384, 704)
-        origin_size = img.shape[:2]
-        rsz_img = cv2.resize(img, tuple(size[::-1]), interpolation=cv2.INTER_LINEAR)
-        rsz_img = np.repeat(rsz_img[None], 3, axis=0).astype(np.float32) / 255.
-        tensor = torch_utils.data_convert(rsz_img[None], dtype=dtype)
-        try:
-            with torch.no_grad():
-                res = model(tensor)
-        except Exception as e:
-            print(e)
-            print('model inference failed')
-            continue
-        res = [torch.unsqueeze(v, 0) for v in res]
-        output_keys = [
-                    'pred_boxes',
-                    'pred_logits',
-                    'pred_masks',
-                    'pred_labels'
-                ]
-        res_dicts = dict(zip(output_keys, res))
-        color_image, mask_iamge = draw_preditions_boxes(
-            tensor,
-            res_dicts,
-            save=save,
-            save_dir='outputs/export/',
-            fname=os.path.relpath(file, path),
-            origin_size=origin_size,
-            segmentation_mode='crop_and_resize',
-            mask_probability_threshold=MASK_PROBABILITY_THRESHOLD,
-            segmentation_crop_box_scale=1.15,
-        )
-        assert len(mask_iamge) == 1, "Expected a single mask image."
-        savename = os.path.join(mask_save_dir, os.path.relpath(file, path))
-        os.makedirs(os.path.dirname(savename), exist_ok=True)
-        # cv2.imwrite(savename, mask_iamge[0].astype(np.uint8))
-        from trainer import image_utils
-        image_utils.cv2_imwrite(savename.replace('.jpg', '.png'), mask_iamge[0].astype(np.uint8))
-        image_utils.cv2_imwrite(savename, color_image[0].astype(np.uint8)[..., ::-1])  # Convert RGB to BGR for saving with OpenCV
-        print(f"Saved mask image to: {savename.replace('.jpg', '.png')}")
-
+            bboxes, logits, masks = outputs
+            outputs = {
+                'pred_boxes': bboxes,
+                'pred_logits': logits,
+                'pred_masks': masks
+            }
+        # print(outputs.keys())
+        print(outputs['pred_logits'].shape, outputs['pred_boxes'].shape)
+        if 'pred_masks' in outputs:
+            print(outputs['pred_masks'].shape)
     
+        # try:
+            color_image, mask_iamge = draw_preditions_boxes(
+                img_tensor, outputs, save=False, origin_size=img.shape[:2],
+                                    segmentation_mode='crop_and_resize',
+                mask_probability_threshold=MASK_PROBABILITY_THRESHOLD,
+                segmentation_crop_box_scale=1.15,
+                with_source_concat=False,
+                paste_masks_at_original_size=True,
+                input_content_box=input_content_box,
+            )
+            
+    return color_image[0], mask_iamge[0]
+
+
+
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='RF-DETR tooth segmentation inference')
-    parser.add_argument(
-        '--use-ema',
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help='Use ema_model weights from the checkpoint (default: enabled).',
-    )
-    parser.add_argument(
-        '--with-source-concat',
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help='Concatenate source image with output for visualization (default: disabled).',
-    )
-    cli_args = parser.parse_args()
-    main(use_ema=cli_args.use_ema,
-         with_source_concat=cli_args.with_source_concat)
-    # export_libtorch('outputs/temp.pt')
+    # parser = argparse.ArgumentParser(description='RF-DETR tooth segmentation inference')
+    # parser.add_argument(
+    #     '--use-ema',
+    #     action=argparse.BooleanOptionalAction,
+    #     default=True,
+    #     help='Use ema_model weights from the checkpoint (default: enabled).',
+    # )
+    # parser.add_argument(
+    #     '--with-source-concat',
+    #     action=argparse.BooleanOptionalAction,
+    #     default=False,
+    #     help='Concatenate source image with output for visualization (default: disabled).',
+    # )
+    # cli_args = parser.parse_args()
+    # main(use_ema=cli_args.use_ema,
+    #      with_source_concat=cli_args.with_source_concat)
+    # export_libtorch('outputs/temp.pt', shape=(384, 704), dtype=torch.float16)
     # coreml_export_main()
     # test_coreml_inference()
-    # inference_libtorch_model_main()
-#
+    inference_libtorch_model_main()
+

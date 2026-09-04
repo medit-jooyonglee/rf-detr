@@ -144,6 +144,17 @@ def test_crop_instance_masks_uses_corresponding_box():
     assert crop.mean() > 0.95
 
 
+def test_crop_instance_masks_preserves_floating_dtype():
+    masks = torch.ones(1, 8, 8, dtype=torch.float64)
+    boxes = torch.tensor([[0.5, 0.5, 1.0, 1.0]], dtype=torch.float32)
+
+    crop = crop_instance_masks(masks, boxes, (4, 4))
+    empty_crop = crop_instance_masks(masks[:0], boxes[:0], (4, 4))
+
+    assert crop.dtype == masks.dtype
+    assert empty_crop.dtype == masks.dtype
+
+
 def test_crop_head_output_shape_and_gradients():
     head = CropAndResizeSegmentationHead((128, 64))
     crops = torch.rand(3, 4, 128, 64, requires_grad=True)
