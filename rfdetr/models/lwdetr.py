@@ -937,9 +937,23 @@ def dice_loss(
     return loss.sum() / num_masks
 
 
-dice_loss_jit = torch.jit.script(
-    dice_loss
-)  # type: torch.jit.ScriptModule
+def _lazy_jit_script(fn):
+    # Defers torch.jit.script() until first call instead of at import time,
+    # since scripting needs fn's Python source and frozen builds don't ship it.
+    state = {}
+
+    def wrapper(*args, **kwargs):
+        if "scripted" not in state:
+            try:
+                state["scripted"] = torch.jit.script(fn)
+            except OSError:
+                state["scripted"] = fn
+        return state["scripted"](*args, **kwargs)
+
+    return wrapper
+
+
+dice_loss_jit = _lazy_jit_script(dice_loss)  # type: torch.jit.ScriptModule
 
 
 def sigmoid_ce_loss(
@@ -962,9 +976,7 @@ def sigmoid_ce_loss(
     return loss.mean(1).sum() / num_masks
 
 
-sigmoid_ce_loss_jit = torch.jit.script(
-    sigmoid_ce_loss
-)  # type: torch.jit.ScriptModule
+sigmoid_ce_loss_jit = _lazy_jit_script(sigmoid_ce_loss)  # type: torch.jit.ScriptModule
 
 
 def calculate_uncertainty(logits):
