@@ -299,3 +299,7 @@ xray 데이터셋
   * 모델 경량화를 위해 divnov2 모듈 수정
     * tiny 버전 추가 - dinov2_windowed_tiny 
 * 학습 환경 수정
+
+* pretrained-weights
+  * xray-panoramic-teeth-seg
+     * outputs\pretrained\segmentation\xray_teeth_seg\bounding_bbox_regularization
