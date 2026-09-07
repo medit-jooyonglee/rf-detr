@@ -1,0 +1,6 @@
+[submodule "trainer"]
+	path = trainer
+	url = https://github.com/medit-AI/torch-trainer.git
+[submodule "outputs/pretrained"]
+	path = outputs/pretrained
+	url = https://github.com/medit-AI/pretrained_models.git

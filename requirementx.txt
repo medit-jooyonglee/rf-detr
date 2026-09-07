@@ -1,0 +1,8 @@
+roboflow
+supervision
+peft
+pydantic
+pycocotools
+pytorch_utils
+transformers==4.57.3
+

@@ -16,6 +16,8 @@ import torchvision
 from .coco import build as build_coco
 from .o365 import build_o365
 from .coco import build_roboflow
+from .teeth import build as build_teethdsata
+from .xraypanoramic import build as build_xray_teeth
 
 
 def get_coco_api_from_dataset(dataset):
@@ -33,4 +35,9 @@ def build_dataset(image_set, args, resolution):
         return build_o365(image_set, args, resolution)
     if args.dataset_file == 'roboflow':
         return build_roboflow(image_set, args, resolution)
+    if args.dataset_file == 'teeth':
+        return build_teethdsata(image_set, args, resolution)
+    if args.dataset_file == 'xray_teeth':
+        return build_xray_teeth(image_set, args, resolution)
+        
     raise ValueError(f'dataset {args.dataset_file} not supported')

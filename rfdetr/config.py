@@ -6,7 +6,7 @@
 
 
 from pydantic import BaseModel
-from typing import List, Optional, Literal, Type
+from typing import List, Optional, Literal, Tuple, Type, Union
 import torch
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
@@ -37,13 +37,24 @@ class ModelConfig(BaseModel):
     cls_loss_coef: float = 1.0
     segmentation_head: bool = False
     mask_downsample_ratio: int = 4
+    segmentation_mode: Literal["full_image", "crop_and_resize"] = "full_image"
+    segmentation_crop_size: Tuple[int, int] = (128, 64)
+    coarse_hint_scale: float = 0.35
+    segmentation_crop_box_scale: float = 1.15
+    coarse_hint_dropout: float = 0.30
+    refine_outer_boundary_loss_coef: float = 4.0
+    
+    # dino-v2 antialias option
+    antialias: bool = True
+    # vanila - bicubim, for coreml-support, default value is changed as bilinear
+    interp_mode: str = 'bilinear'
 
 
 class RFDETRBaseConfig(ModelConfig):
     """
     The configuration for an RF-DETR Base model.
     """
-    encoder: Literal["dinov2_windowed_small", "dinov2_windowed_base"] = "dinov2_windowed_small"
+    encoder: Literal["dinov2_windowed_tiny", "dinov2_windowed_small", "dinov2_windowed_base"] = "dinov2_windowed_small"
     hidden_dim: int = 256
     patch_size: int = 14
     num_windows: int = 4
@@ -138,9 +149,9 @@ class TrainConfig(BaseModel):
     ia_bce_loss: bool = True
     cls_loss_coef: float = 1.0
     num_select: int = 300
-    dataset_file: Literal["coco", "o365", "roboflow"] = "roboflow"
+    dataset_file: Literal["coco", "o365", "roboflow", "teeth", "xray_teeth"] = "roboflow"
     square_resize_div_64: bool = True
-    dataset_dir: str
+    dataset_dir: Union[str, List[str]]
     output_dir: str = "output"
     multi_scale: bool = True
     expanded_scales: bool = True
@@ -159,11 +170,21 @@ class TrainConfig(BaseModel):
     class_names: List[str] = None
     run_test: bool = True
     segmentation_head: bool = False
+    segmentation_mode: Literal["full_image", "crop_and_resize"] = "full_image"
+    segmentation_crop_size: Tuple[int, int] = (128, 64)
+    coarse_hint_scale: float = 0.35
+    segmentation_crop_box_scale: float = 1.15
+    coarse_hint_dropout: float = 0.30
+    refine_outer_boundary_loss_coef: float = 4.0
 
 
 class SegmentationTrainConfig(TrainConfig):
     mask_point_sample_ratio: int = 16
     mask_ce_loss_coef: float = 5.0
     mask_dice_loss_coef: float = 5.0
+    # extra weight on an additional BCE term restricted to pixels near the GT mask boundary.
+    # helps on low edge-contrast cases (e.g. metal/prosthetic artifacts) where the plain
+    # dice/ce losses are dominated by the easy interior pixels.
+    mask_boundary_loss_coef: float = 2.0
     cls_loss_coef: float = 5.0
     segmentation_head: bool = True

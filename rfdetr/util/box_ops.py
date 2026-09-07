@@ -117,9 +117,23 @@ def batch_dice_loss(inputs: torch.Tensor, targets: torch.Tensor):
     return loss
 
 
-batch_dice_loss_jit = torch.jit.script(
-    batch_dice_loss
-)  # type: torch.jit.ScriptModule
+def _lazy_jit_script(fn):
+    # Defers torch.jit.script() until first call instead of at import time,
+    # since scripting needs fn's Python source and frozen builds don't ship it.
+    state = {}
+
+    def wrapper(*args, **kwargs):
+        if "scripted" not in state:
+            try:
+                state["scripted"] = torch.jit.script(fn)
+            except OSError:
+                state["scripted"] = fn
+        return state["scripted"](*args, **kwargs)
+
+    return wrapper
+
+
+batch_dice_loss_jit = _lazy_jit_script(batch_dice_loss)  # type: torch.jit.ScriptModule
 
 
 def batch_sigmoid_ce_loss(inputs: torch.Tensor, targets: torch.Tensor):
@@ -149,6 +163,4 @@ def batch_sigmoid_ce_loss(inputs: torch.Tensor, targets: torch.Tensor):
     return loss / hw
 
 
-batch_sigmoid_ce_loss_jit = torch.jit.script(
-    batch_sigmoid_ce_loss
-)  # type: torch.jit.ScriptModule
+batch_sigmoid_ce_loss_jit = _lazy_jit_script(batch_sigmoid_ce_loss)  # type: torch.jit.ScriptModule

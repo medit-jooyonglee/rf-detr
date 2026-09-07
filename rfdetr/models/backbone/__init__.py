@@ -74,6 +74,8 @@ def build_backbone(
     patch_size,
     num_windows,
     positional_encoding_size,
+    antialias=True,
+    interp_mode='blinear',
 ):
     """
     Useful args:
@@ -104,6 +106,8 @@ def build_backbone(
         patch_size=patch_size,
         num_windows=num_windows,
         positional_encoding_size=positional_encoding_size,
+        antialias=antialias,
+        interp_mode=interp_mode,
     )
 
     model = Joiner(backbone, position_embedding)

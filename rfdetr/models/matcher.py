@@ -85,11 +85,12 @@ class HungarianMatcher(nn.Module):
         tgt_ids = torch.cat([v["labels"] for v in targets])
         tgt_bbox = torch.cat([v["boxes"] for v in targets])
 
-        masks_present = "masks" in targets[0]
+        mask_key = "pred_masks_coarse" if "pred_masks_coarse" in outputs else "pred_masks"
+        masks_present = "masks" in targets[0] and mask_key in outputs
 
         if masks_present:
             tgt_masks = torch.cat([v["masks"] for v in targets])
-            out_masks = outputs["pred_masks"].flatten(0, 1)
+            out_masks = outputs[mask_key].flatten(0, 1)
 
         # Compute the giou cost betwen boxes
         giou = generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
@@ -99,7 +100,12 @@ class HungarianMatcher(nn.Module):
         alpha = 0.25
         gamma = 2.0
         
-        # neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())
+        num_total_targets = sum(len(v["labels"]) for v in targets)
+        if num_total_targets == 0:
+        
+            return [(torch.as_tensor([], dtype=torch.int64), 
+                    torch.as_tensor([], dtype=torch.int64)) for _ in range(bs)]
+            # neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())
         # pos_cost_class = alpha * ((1 - out_prob) ** gamma) * (-(out_prob + 1e-8).log())
         # we refactor these with logsigmoid for numerical stability
         neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-F.logsigmoid(-flat_pred_logits))
