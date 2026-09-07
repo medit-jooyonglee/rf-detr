@@ -115,7 +115,7 @@ def main(use_ema=True, with_source_concat=False):
     # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_0824/JPEGImages/'
     # path = 
     
-    mask_save_dir = 'E:/temp/test_cbct_ios'
+    mask_save_dir = 'E:/dataset/reverse_tomosynthesis/cbct_ios_mask_temp_test'
     found = diskmanager.deep_search_files(path, exts=['.jpg', '.jpeg'])
     # found = glob.glob(f'{path}/*.jpg')
     i_break = 30
@@ -201,7 +201,7 @@ def init_and_get_model(config=None, device='cuda', export=False, use_ema=True):
             # # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_0819_crop_retrain/checkpoint.pth',
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_crop_regularization/checkpoint.pth',
             # pretrain_weights='output/bounding_bbox/checkpoint.pth',
-            pretrain_weights='output/bounding_bbox_regularization/checkpoint.pth',
+            pretrain_weights='outputs/pretrained/segmentation/xray_teeth_seg/bounding_bbox_regularization/checkpoint.pth',
             # 'output/xray_teeth33_dinov2tiny_small_seg_crop_retrain'
             # 'output/xray_teeth33_dinov2tiny_small_seg_0819_all/eval'
             **config,
@@ -491,24 +491,24 @@ def predict_wrapper(img, model=None):
 
 
 if __name__ == '__main__':
-    # parser = argparse.ArgumentParser(description='RF-DETR tooth segmentation inference')
-    # parser.add_argument(
-    #     '--use-ema',
-    #     action=argparse.BooleanOptionalAction,
-    #     default=True,
-    #     help='Use ema_model weights from the checkpoint (default: enabled).',
-    # )
-    # parser.add_argument(
-    #     '--with-source-concat',
-    #     action=argparse.BooleanOptionalAction,
-    #     default=False,
-    #     help='Concatenate source image with output for visualization (default: disabled).',
-    # )
-    # cli_args = parser.parse_args()
-    # main(use_ema=cli_args.use_ema,
-    #      with_source_concat=cli_args.with_source_concat)
+    parser = argparse.ArgumentParser(description='RF-DETR tooth segmentation inference')
+    parser.add_argument(
+        '--use-ema',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='Use ema_model weights from the checkpoint (default: enabled).',
+    )
+    parser.add_argument(
+        '--with-source-concat',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='Concatenate source image with output for visualization (default: disabled).',
+    )
+    cli_args = parser.parse_args()
+    main(use_ema=cli_args.use_ema,
+         with_source_concat=cli_args.with_source_concat)
     # export_libtorch('outputs/temp.pt', shape=(384, 704), dtype=torch.float16)
     # coreml_export_main()
     # test_coreml_inference()
-    inference_libtorch_model_main()
+    # inference_libtorch_model_main()
 
