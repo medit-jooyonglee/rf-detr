@@ -136,20 +136,46 @@ def get_my_arg_parse():
 
 
 def train_from_xray_teeth_dir():
+    # public xray dataset from build
+    # 1. Teeth Segmentation on dental X-ray images
+    # 2. The Tufts Dental Database 2022
+    # medit-datset from label-me(https://github.com/medit-AI/labelme.git) and converting. 
+    # 
     
-    dataset_dir = [
-        '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2/',
-        '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/',
-        # '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/'
-        
-    ]
-    coco_directories = [
-            # ('E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm', 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm/annotations.json')
-            ('/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_0824/', 
-             '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_0824/annotations.json')
+    import platform
+    if platform.system().lower() == 'windows':
+        dataset_dir = [
+            # kaggle set 
+            'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2',
+            'E:/dataset/reverse_tomosynthesis/xray_panoramic/kaggle_2222/',
+            # 'E:/dataset/reverse_tomosynthesis/xray_panoramic/kaggle_2222/'
+            
         ]
+        coco_directories = [
+                # ('E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm', 
+                # 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm/annotations.json')
+                ('E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm_latest_0824', 
+                'E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm_latest_0824/annotations.json')
+            ]
+        annot_file = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_coco_33_seg.json'
+    elif platform.system().lower() == 'linux':
+        
     
-    annot_file = '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_coco_33_seg.json'
+        
+        dataset_dir = [
+            '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2/',
+            '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/',
+            # '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/'
+            
+        ]
+        coco_directories = [
+                # ('E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm', 
+                # 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm/annotations.json')
+                ('/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_0824/', 
+                '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_0824/annotations.json')
+            ]
+    
+        annot_file = '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_coco_33_seg.json'
     args = get_my_arg_parse()
     
     # dataset_dir = args.coco_dir
@@ -313,7 +339,7 @@ if __name__ == "__main__":
     # coco_dir = '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle/Teeth Segmentation JSON/d2/'
     # 'E:\dataset\reverse_tomosynthesis\kaggle_xrays\xray_teeth_seg_kaggle\Teeth Segmentation JSON\d2'
     # coco_dir = '/data1/jooyonglee/teeth_segmentation3d/render_set/teeth_seg_3d/'
-    torch.cuda.set_device(torch.device('cuda:3'))
+    torch.cuda.set_device(torch.device('cuda:0'))
     # train_from_teeth_dir(coco_dir)
     train_from_xray_teeth_dir()
 
