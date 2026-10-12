@@ -30,12 +30,12 @@ IoU metric: segm
 
 ## 2. 데이터셋 구성 (main.py 기준, 마지막 학습 환경)
 
-| # | 데이터 | 로컬 PC 경로 | 원본 포맷 | 로더 | 사용 split |
-|---|---|---|---|---|---|
-| ① | Kaggle Teeth Segmentation (humansintheloop) | `E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2` | 이미지별 `ann/*.json` (supervisely) | `search_kaggle_data01` → `parse_item_coco` | train 0~0.85 / val 0.85~0.9 / test 0.9~1.0 |
-| ② | Tufts Dental 2022 | `E:/dataset/reverse_tomosynthesis/kaggle_xrays/kaggle_2222` | `rfdetr/util/dataloader.py::tufts_to_coco`로 `ann/*.json` 형태로 변환 | `search_kaggle_data02` → `parse_item_coco` | 위와 같음 |
-| ③ | 자체 구축 데이터 (`cbct_ios_dcm`) | `E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm` | `annotations.json` (원래부터 COCO) | `CocoDetection` → `_read_coco_image` (`ResizeCocoSample`) | **train에만 사용** |
-| - | UFBA-425, A dual-labeled dataset | - | 변환 안 됨 | - | 사용 안 함 (README에만 있음) |
+| # | 데이터 | 로컬 PC 경로 | 원본 포맷 | 로더 | 사용 split | 비고|
+|---|---|---|---|---|---|---|
+| ① | Kaggle Teeth Segmentation (humansintheloop) | `E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2` | 이미지별 `ann/*.json` (supervisely) | `search_kaggle_data01` → `parse_item_coco` | train 0~0.85 / val 0.85~0.9 / test 0.9~1.0 ||
+| ② | Tufts Dental 2022 | `E:/dataset/reverse_tomosynthesis/kaggle_xrays/kaggle_2222` | `rfdetr/util/dataloader.py::tufts_to_coco`로 `ann/*.json` 형태로 변환 | `search_kaggle_data02` → `parse_item_coco` | 위와 같음 ||
+| ③ | 자체 구축 데이터 (`cbct_ios_dcm`) | `E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm` | `annotations.json` (원래부터 COCO는 아니고, labelme 로 구축후 cocoformat으로 변환. ) | labelme-https://github.com/medit-AI/labelme.git  / dataset(dropbox) Medit_AI Dropbox\Medit_AI\xray_panoramic\cbct_ios_dcm   / 변환 tool examples\instance_segmentation\labelme2coco.py (labelme)`CocoDetection` → `_read_coco_image` (`ResizeCocoSample`) | **train에만 사용** ||
+| - | UFBA-425, A dual-labeled dataset | - | 변환 안 됨 | - | 사용 안 함 (README에만 있음) ||
 
 - 평가 GT json(`xray_coco_33_seg.json`)에는 ①과 ②만 들어 있다. ①은 이미지 598장(치아 14,663개), ②는 1,000장(치아 24,055개).
 - annotation 수(38,809개)는 이미지 수가 아니라 **치아 instance 수**다. 이미지당 평균 약 24개.
