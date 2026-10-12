@@ -267,6 +267,7 @@ xray 데이터셋
 |The Tufts Dental Database 2022|https://www.kaggle.com/datasets/tommyngx/the-tufts-dental-database-2022/data|rfdetr\util\dataloader.py::tufts_to_coco|E:\dataset\reverse_tomosynthesis\kaggle_xrays\kaggle_2222|
 |UFBA-425|https://figshare.com/articles/dataset/UFBA-425/29827475|확인필요|-|-|
 |A dual-labeled dataset|https://www.kaggle.com/datasets/zwbzwb12341234/a-dual-labeled-dataset|-|-|-|
+|자체 학습 데이터셋 | 백원장님 데이터셋 & | https://github.com/medit-AI/labelme.git/  examples\instance_segmentation\labelme2coco.py |-|-|
 
 
 

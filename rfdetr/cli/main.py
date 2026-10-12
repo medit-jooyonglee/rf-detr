@@ -116,7 +116,7 @@ def get_my_arg_parse():
     
     parser.add_argument('--pretrain_weights', type=str,
                         # default=True, 
-                        default='',
+                        default='outputs/pretrained/segmentation/xray_teeth_seg/bounding_bbox_regularization/checkpoint.pth',
                         help='Run save results after training')
     
     # parser.add_argument('--pretrain_weights', type=str,
@@ -197,7 +197,10 @@ def train_from_xray_teeth_dir():
         refine_outer_boundary_loss_coef=4.0,
         segmentation_crop_box_scale=1.15,
         coarse_hint_dropout=0.30,
-        pretrain_weights="output/xray_teeth33_dinov2tiny_small_seg_crop_retrain/checkpoint0059.pth",
+        # pretrain_weights="output/xray_teeth33_dinov2tiny_small_seg_crop_retrain/checkpoint0059.pth",
+        pretrain_weights=args.pretrain_weights,
+        # "output/xray_teeth33_dinov2tiny_small_seg_crop_retrain/checkpoint0059.pth",
+        # pre
         # pretrain_weights="output/xray_teeth/checkpoint0059.pth",
         # pretrain_weights='output/xray_teeth33/checkpoint0039.pth'
         # pretrain_weights='output/xray_teeth33/checkpoint_best_regular.pth'
@@ -310,7 +313,7 @@ if __name__ == "__main__":
     # coco_dir = '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle/Teeth Segmentation JSON/d2/'
     # 'E:\dataset\reverse_tomosynthesis\kaggle_xrays\xray_teeth_seg_kaggle\Teeth Segmentation JSON\d2'
     # coco_dir = '/data1/jooyonglee/teeth_segmentation3d/render_set/teeth_seg_3d/'
-    torch.cuda.set_device(torch.device('cuda:5'))
+    torch.cuda.set_device(torch.device('cuda:3'))
     # train_from_teeth_dir(coco_dir)
     train_from_xray_teeth_dir()
 
