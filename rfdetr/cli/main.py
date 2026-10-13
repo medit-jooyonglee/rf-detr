@@ -110,15 +110,21 @@ def get_my_arg_parse():
     parser.add_argument('--eval_save', action='store_true',
                         # default=True,
                         help='Run save results after training')
+    parser.add_argument('--batch_size', type=int, required=False, default=4)
     parser.add_argument('--segmentation_head', action='store_true',
                         # default=True, 
                         help='Run save results after training')
     
     parser.add_argument('--pretrain_weights', type=str,
-                        # default=True, 
+                        # default=True,
                         default='outputs/pretrained/segmentation/xray_teeth_seg/bounding_bbox_regularization/checkpoint.pth',
                         help='Run save results after training')
-    
+    parser.add_argument('--build_tufts', action='store_true',
+                        help='Tufts(kaggle_2222) teeth_polygon.pkl -> ann/*.json 변환(기존 ann 자동 백업) + 변환 점검 후 종료')
+    parser.add_argument('--build_json', action='store_true',
+                        help='학습 dataset_dir로 평가 GT coco json(원본 좌표, *_v2.json)을 재빌드/검증하고 종료 '
+                             '(기존 _v2.json은 자동 백업). --build_tufts와 같이 주면 Tufts 변환 후 빌드')
+
     # parser.add_argument('--pretrain_weights', type=str,
     #                     # default=True, 
     #                     default='',
@@ -147,8 +153,7 @@ def train_from_xray_teeth_dir():
         dataset_dir = [
             # kaggle set 
             'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2',
-            'E:/dataset/reverse_tomosynthesis/xray_panoramic/kaggle_2222/',
-            # 'E:/dataset/reverse_tomosynthesis/xray_panoramic/kaggle_2222/'
+            'E:/dataset/reverse_tomosynthesis/kaggle_xrays/kaggle_2222/',
             
         ]
         coco_directories = [
@@ -157,7 +162,10 @@ def train_from_xray_teeth_dir():
                 ('E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm_latest_0824', 
                 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm_latest_0824/annotations.json')
             ]
-        annot_file = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_coco_33_seg.json'
+        # annot_file = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_coco_33_seg.json'
+        annot_file = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_coco_33_seg_v2.json'
+        # json file_name 상대경로 기준 (dataset_dir들의 공통 상위 폴더)
+        json_base_dirs = ['E:/dataset/reverse_tomosynthesis/kaggle_xrays']
     elif platform.system().lower() == 'linux':
         
     
@@ -176,8 +184,37 @@ def train_from_xray_teeth_dir():
             ]
     
         annot_file = '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_coco_33_seg.json'
+        json_base_dirs = ['/data1/jooyonglee/reverse_tomo/xray_panoramic']
     args = get_my_arg_parse()
-    
+
+    # 평가 GT json: 기존 json은 images[].width/height, area가 리사이즈 기준이라 segm 평가가 0이 된다.
+    # 원본 좌표로 재빌드한 *_v2.json을 쓴다. (docs/troubleshoots/xray_coco_json_segm_eval.md)
+    annot_file_v2 = annot_file.replace('.json', '_v2.json')
+    if args.build_tufts:
+        # ② Tufts 포맷 변환 (평가 json의 Tufts polygon도 ann/*.json에서 읽으므로 --build_json보다 먼저)
+        from rfdetr.util.dataloader import tufts_to_coco
+        from rfdetr.datasets.xray_overlap_stats import check_tufts_conversion
+        tufts_dir = dataset_dir[1]
+        tufts_to_coco(tufts_dir=tufts_dir)
+        check_tufts_conversion(num_samples=100, tufts_dir=tufts_dir)  # IoU 평균 ~0.99 이면 정상
+    if args.build_json:
+        import time
+        from rfdetr.datasets.xraypanoramic import build_xray_coco_json, verify_xray_coco_json
+        if os.path.exists(annot_file_v2):
+            backup = annot_file_v2.replace('.json', f"_backup_{time.strftime('%Y%m%d_%H%M%S')}.json")
+            os.rename(annot_file_v2, backup)
+            print(f'backup {annot_file_v2} -> {backup}')
+        # 학습과 같은 dataset_dir(①②)로 빌드. ③ coco_directories는 train 전용이라 제외
+        build_xray_coco_json(dataset_dir, json_base_dirs, annot_file_v2, num_classes=args.num_classes)
+        verify_xray_coco_json(annot_file_v2, base_dir=json_base_dirs[0],
+                              vis_dir='outputs/xray_coco_json_vis', num_vis=20)
+    if args.build_tufts or args.build_json:
+        return
+    if os.path.exists(annot_file_v2):
+        annot_file = annot_file_v2
+    else:
+        print(f'[warning] {annot_file_v2} not found. segm eval will be wrong with {annot_file}. run with --build_json first.')
+
     # dataset_dir = args.coco_dir
     num_classes = args.num_classes
     # annot_file = args.annot_file
@@ -252,7 +289,7 @@ def train_from_xray_teeth_dir():
         device="cuda" if device_supports_cuda else "cpu",
         dataset_file='xray_teeth',
         # coco_path=teeth_dir,
-        batch_size=4,
+        batch_size=args.batch_size,
         num_workers=0,
         square_resize=False,
         # segmentation_head=True,

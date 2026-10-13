@@ -700,7 +700,10 @@ class XrayPnoaramicInstance(XrayPnoramic):
         bboxes = np.array([obj['bbox'] for obj in annot_data], dtype=np.float32).reshape(-1, 4)
         # ()
         class_labels = np.array([int(obj['class_title']) for obj in annot_data], dtype=np.int64)
+        # annotation이 없는 이미지는 아래에서 랜덤 가짜 박스(class 0)를 만든다. 평가 GT json에는 넣으면 안 되므로 표시해 둔다.
+        is_dummy = False
         if bboxes.size == 0 and class_labels.size == 0:
+            is_dummy = True
             shape = np.array(src.shape[:2][::-1])
             num_gen = 3
             bmin = np.random.uniform(0, 0.8, size=(num_gen, 2))
@@ -928,7 +931,15 @@ class XrayPnoaramicInstance(XrayPnoramic):
         )
         if self.include_masks:
             annot['masks'] = masks
-            
+        # coco json export(평가 GT)용: 리사이즈/증강 전 원본 좌표 polygon. 학습 경로에서는 __getitem__에서 pop 된다.
+        annot['is_dummy'] = is_dummy
+        if self.include_masks and not is_dummy:
+            annot['segmentation_orig'] = [
+                np.asarray(annot_data[i]['segmentation'], dtype=np.float64).ravel().tolist()
+                for i in kept_bbox_indices
+                if i < len(annot_data)
+            ]
+
         # src_rsz_permute = np.transpose(src_rsz, [2, 0, 1]).copy()
         # on color
         # src_rsz = (src_rsz / 255)[None].astype(np.float32)
@@ -942,91 +953,118 @@ class XrayPnoaramicInstance(XrayPnoramic):
 
 
         
-    def coco_json_export(self, base_dir='', debug_break=-1):
-        
-        base_dir = base_dir.replace('\\', '/')
-        class_names = [
-            'gum', *[str(v) for v in fdi_sort], 'unknown'
+    def coco_json_export(self, base_dir: Union[str, List[str]] = '', debug_break=-1):
+        """평가용 GT coco json을 원본 이미지 좌표 기준으로 만든다.
 
-        ]
+        학습 로더(parse_item_coco)로 읽되, 학습용 resize 결과는 쓰지 않는다.
+        - images[].width/height : 원본 크기 (target['orig_size'])
+        - bbox / segmentation   : 원본 좌표 (target['boxes'] with norm_bbox=False, target['segmentation_orig'])
+        - area                  : 원본 polygon의 마스크 면적
+        - augmentation 끄고, 가짜 박스(is_dummy) 이미지는 annotation 없이 image만 넣는다.
+        - coco_apis(자체 구축 데이터 ③)는 train 전용이므로 넣지 않는다.
+
+        base_dir: file_name을 상대경로로 만들 기준 디렉토리. 데이터셋 폴더들의 상위가 다르면 list로 여러 개 넘긴다.
+        """
+        import pycocotools.mask as mask_util
+
+        base_dirs = [base_dir] if isinstance(base_dir, str) else list(base_dir)
+        base_dirs = [b.replace('\\', '/').rstrip('/') + '/' for b in base_dirs]
+
+        def to_relative(filename):
+            filename = os.path.normpath(filename).replace('\\', '/')
+            for b in base_dirs:
+                if filename.lower().startswith(b.lower()):
+                    return filename[len(b):]
+            raise AssertionError(f"Filename {filename} does not start with base_dir {base_dirs}")
+
+        class_names = ['gum', *[str(v) for v in fdi_sort], 'unknown']
         type_categories = [
-
+            {"id": i, "name": name, "supercategory": "tooth_type"}
+            for i, name in enumerate(class_names)
         ]
-        for i, name in enumerate(class_names):
-            type_categories.append({
-                "id": i,
-                "name": name,
-                'supercategory': 'tooth_type',
-            })
-        
-
         coco_json = {
             "images": [],
             "annotations": [],
             "categories": type_categories
         }
-        
-        
-        annotations = coco_json["annotations"]
         images = coco_json["images"]
-        annotation_id = 0
-        for i in tqdm.tqdm(range(len(self))):
-            try:
-                item = self.parse_item_coco(i, norm_bbox=False, box_format='xywh')
-            except ValueError as e:
-                
-                # print(f"Error processing index {i}: {e}")
-                continue
-            # filename = self.source_files[i]
-            filename = self.file_name(i)
-            assert filename.startswith(base_dir), f"Filename {filename} does not start with base_dir {base_dir}"
-            relative_filename = os.path.relpath(filename, base_dir)
-            # annotation_id = 1
-            image, target = item
-            # image is CHW; shape[1:] == (H, W)
-            height, width = image.shape[1:]
-            image_id = i
-            # for image_id, img in enumerate(custom_dataset, 1):?
-            images.append({
-                "id": image_id,
-                "file_name": relative_filename,
-                "width": width,
-                "height": height,
+        annotations = coco_json["annotations"]
 
-            })
-            keys = ['boxes', 'labels', 'area', 'is_crowd', 'segmentation']
-            bboxes, labels, areas, iscrowd, segmentation = [target.get(key, None) for key in keys]
-            # is_crowd & is_crowd comaptibie
-            # if iscrowd is None:
-            #     iscrowd = [False] * len(bboxes)
-            
+        # GT에는 augmentation(회전 등)이 들어가면 안 된다
+        prev_augment, self.augment_en = self.augment_en, False
+        num_coco = len(self.coco_apis) if self.coco_apis is not None else 0
+        skipped = {"coco_apis_image": 0, "dummy_image": 0, "no_segmentation": 0, "empty_box": 0}
+        try:
+            for idx in tqdm.tqdm(range(len(self))):
+                if idx < num_coco:
+                    # ③ 자체 COCO 데이터는 평가 json에 넣지 않는다 (segmentation이 bool mask라 json 저장도 불가)
+                    skipped["coco_apis_image"] += 1
+                    continue
+                _, target = self.parse_item_coco(idx, norm_bbox=False, box_format='xywh')
 
-            for i, (box, label, area, crowd) in enumerate(zip(bboxes, labels, areas, iscrowd)):
-                
+                h, w = [int(v) for v in target['orig_size']]  # 원본 (H, W)
+                image_id = len(images)  # 0..N-1 연속 유지
+                images.append({
+                    "id": image_id,
+                    "file_name": to_relative(self.file_name(idx)),
+                    "width": w,
+                    "height": h,
+                })
 
-                i_annot = {
-                    "id": annotation_id,
-                    "image_id": image_id,
-                    "category_id": int(label),
-                    "bbox": box.tolist(),  # [x, y, width, height]
-                    "area": float(area),
-                    "iscrowd": int(crowd),
-                }
-                if len(segmentation) == len(bboxes):
-                    seg = segmentation[i]
-                    i_annot["segmentation"] = [seg]
-                
-                annotations.append(i_annot)
-                annotation_id += 1
-            if debug_break > 0 and debug_break > 20:
-                # logg
-                break
+                if target.get('is_dummy', False):
+                    skipped["dummy_image"] += 1
+                    continue
 
+                segs = target.get('segmentation_orig', None)
+                if segs is not None and len(segs) != len(target['boxes']):
+                    raise RuntimeError(f'segmentation/bbox count mismatch: {self.file_name(idx)}')
+
+                for k, (box, label) in enumerate(zip(target['boxes'], target['labels'])):
+                    x, y, bw, bh = [float(v) for v in box]
+                    # 원본 이미지 범위로 clip
+                    x0, y0 = max(x, 0.0), max(y, 0.0)
+                    x1, y1 = min(x + bw, float(w)), min(y + bh, float(h))
+                    if x1 <= x0 or y1 <= y0:
+                        skipped["empty_box"] += 1
+                        continue
+                    i_annot = {
+                        # annotation id는 1부터. pycocotools COCOeval은 매칭 결과를 GT id로 저장하고
+                        # 0을 "매칭 안 됨"으로 해석하므로, id 0인 GT에 매칭된 예측이 FP로 계산된다
+                        "id": len(annotations) + 1,
+                        "image_id": image_id,
+                        "category_id": int(label),
+                        "bbox": [x0, y0, x1 - x0, y1 - y0],  # [x, y, width, height]
+                        "area": (x1 - x0) * (y1 - y0),
+                        "iscrowd": 0,
+                    }
+                    if segs is not None:
+                        seg = segs[k]
+                        if len(seg) < 6:  # 점 3개 미만
+                            skipped["no_segmentation"] += 1
+                            continue
+                        rle = mask_util.merge(mask_util.frPyObjects([seg], h, w))
+                        mask_area = float(mask_util.area(rle))
+                        if mask_area <= 0:
+                            # 일직선/납작한 polygon (라벨 오류, 예: Kaggle 367.jpg 15번). IoU가 항상 0이라 제외
+                            skipped["no_segmentation"] += 1
+                            continue
+                        i_annot["segmentation"] = [seg]
+                        i_annot["area"] = mask_area
+                    annotations.append(i_annot)
+
+                if 0 < debug_break <= len(images):
+                    break
+        finally:
+            self.augment_en = prev_augment
+
+        print(f"coco_json_export: images={len(images)}, annotations={len(annotations)}, skipped={skipped}")
         return coco_json
 
         
     def __getitem__(self, index):
         item = self.parse_item_coco(index)
+        for key in ('segmentation', 'segmentation_orig', 'is_dummy'):
+            item[1].pop(key, None)
         # img, target = torch_utils.data_convert(item, device='cpu')
         img, target = torch_utils.data_convert(item, device='cpu')
         if self._transforms is not None:
@@ -1073,25 +1111,27 @@ class XrayPnoaramicInstanceCoco(CocoDetection):
             
         # image id mapping    / rf-detr evaluatiopn. mapping....
         if len(self.coco.imgs) > 0:
-            # assumption image id
-            meta = [self.coco.loadImgs(i)[0] for i in range(len(self.coco.imgs))]
+            # image id 값을 직접 쓴다 (id가 0..N-1 연속이 아니어도 동작)
+            meta = self.coco.loadImgs(self.coco.getImgIds())
             img_id_mapping = {v['file_name'].replace('\\', '/').lower(): v['id'] for v in meta}
             image_files = list(img_id_mapping.keys())
-            
+
             # source_clean = [name.strip().replace('\\', '/').lower() for name in self.base_datset.source_files]
-            source_clean  = [self.base_datset.file_name(i).strip().replace('\\', '/').lower() for i in range(len(self.base_datset))]
-            
+            source_clean  = [os.path.normpath(self.base_datset.file_name(i).strip()).replace('\\', '/').lower() for i in range(len(self.base_datset))]
+
             matched_idx = []
             for abs_path in source_clean:
                 matched = -1
-                for idx, relat in enumerate(image_files):
-                    if abs_path.endswith(relat):
-                        matched = idx
-                        # matched_idx.append(idx)
+                for relat in image_files:
+                    if abs_path.endswith('/' + relat) or abs_path == relat:
+                        matched = img_id_mapping[relat]
                         break
                 matched_idx.append(matched)
-                    
-            assert len(matched_idx) == len(source_clean), 'some images are not matched'
+
+            # ③ 자체 coco 데이터(train 전용)는 평가 json에 없으므로 매칭 대상에서 제외
+            num_coco = len(self.base_datset.coco_apis) if self.base_datset.coco_apis is not None else 0
+            unmatched = [source_clean[i] for i in range(num_coco, len(source_clean)) if matched_idx[i] < 0]
+            assert not unmatched, f'{len(unmatched)} images are not found in annotation json {annot_file}. e.g. {unmatched[:3]}'
             self.index_coco_id = matched_idx
 
             
@@ -1105,7 +1145,8 @@ class XrayPnoaramicInstanceCoco(CocoDetection):
         item = self.base_datset.parse_item_coco(index)
         # img, target = torch_utils.data_convert(item, device='cpu')
         img, target = item
-        target.pop('segmentation', None)        
+        for key in ('segmentation', 'segmentation_orig', 'is_dummy'):
+            target.pop(key, None)
         if self.index_coco_id:
             target.update({'image_id': np.array(self.index_coco_id[index])})
         
@@ -1228,48 +1269,150 @@ def main_xraypanoramic_instance():
         ])
         
         
-def test_build_coco_json():
-    
-        
-    # img_folder = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2'
-    base_dir = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays'
-    # base_dir = 'E:\dataset\reverse_tomosynthesis\kaggle_xrays\cbct_ios_dcm'
-    # ann_file = ''
-    # dataset = XrayPnoaramicInstance(img_folder, '', None, True)
-    
-    num_classes = 33
-    include_masks = True
+def build_xray_coco_json(img_folder: Union[str, List[str]],
+                         base_dir: Union[str, List[str]],
+                         out_file: str,
+                         num_classes: int = 33,
+                         include_masks: bool = True,
+                         debug_break: int = -1):
+    """학습과 같은 데이터셋 로더(XrayPnoaramicInstance)로 평가용 GT coco json을 원본 좌표 기준으로 재빌드한다.
+
+    - img_folder: 학습에 쓰는 dataset_dir 그대로 (①kaggle d2, ②kaggle_2222). ③ coco_directories는 넣지 않는다.
+    - splits는 전체(0~1)로 만든다. train/val/test split은 로더가 file_name으로 매칭한다.
+    - 기존 json을 덮어쓰지 않도록 out_file이 이미 있으면 에러.
+    """
+    assert not os.path.exists(out_file), f'{out_file} already exists. use a new file name (e.g. *_v2.json)'
     dataset = XrayPnoaramicInstance(
-        img_folder= [
-            # 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2',
-            # 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/kaggle_2222',
-            # 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm'
-            
-        ],
+        img_folder=img_folder,
         num_classes=num_classes,
-        # stride=4,
         include_masks=include_masks,
-        coco_directories=[
-            ('E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm', 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm/annotations.json')
-        ],
-        
+        coco_directories=None,          # ③ 제외
         name='train',
-        splits={
-            'train': (0, 1)
-        }
+        splits={'train': (0, 1)},       # 전체 이미지
+        augment_en=False,               # 증강 금지
     )
-    assert len(dataset) > 0
-    
-    # num_classes = 3
-    
-    res = dataset.coco_json_export(base_dir=base_dir)
-    
-    # print(res)
-    filename = f'xray_coco_{num_classes}.json'
-    with open(filename, 'w') as f:
+    assert len(dataset) > 0, f'no images found in {img_folder}'
+    res = dataset.coco_json_export(base_dir=base_dir, debug_break=debug_break)
+    os.makedirs(os.path.dirname(os.path.abspath(out_file)), exist_ok=True)
+    with open(out_file, 'w') as f:
         json.dump(res, f)
-        
-    print(f'coco json file saved to {filename}')
+    print(f'coco json file saved to {out_file}')
+    return out_file
+
+
+def visualize_xray_coco_json(json_path: str, base_dir: str, vis_dir: str, num_vis: int = 20, image_ids=None):
+    """json의 GT(polygon, bbox, category)를 원본 이미지 위에 그려서 저장한다.
+
+    json 좌표계가 원본 이미지와 맞는지 눈으로 확인하는 용도. polygon/bbox가 치아 위에 정확히 겹쳐야 정상.
+    - image_ids: 그릴 image id 목록. None이면 앞에서부터 num_vis장
+    - 저장: {vis_dir}/{image_id:06d}_{파일명}.jpg
+    """
+    from pycocotools.coco import COCO
+    colors_fdis = vtk_utils.get_teeth_color_table(normalize=False)
+
+    coco = COCO(json_path)
+    ids = list(image_ids) if image_ids is not None else coco.getImgIds()[:num_vis]
+    os.makedirs(vis_dir, exist_ok=True)
+    for image_id in tqdm.tqdm(ids, desc='visualize'):
+        info = coco.loadImgs([image_id])[0]
+        img = cv2_imread(os.path.join(base_dir, info['file_name']), flags=cv2.IMREAD_COLOR)
+        anns = coco.loadAnns(coco.getAnnIds(imgIds=[image_id]))
+        overlay = img.copy()
+        for a in anns:
+            color = tuple(int(c) for c in colors_fdis[label_to_fdi(int(a['category_id']), 33)][::-1])  # RGB -> BGR
+            for poly in a.get('segmentation', []):
+                pts = np.asarray(poly, dtype=np.float64).reshape(-1, 1, 2).astype(np.int32)
+                cv2.fillPoly(overlay, [pts], color)
+                cv2.polylines(img, [pts], True, color, 2)
+        img = cv2.addWeighted(overlay, 0.4, img, 0.6, 0)
+        for a in anns:
+            x, y, w, h = [int(round(v)) for v in a['bbox']]
+            cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 255), 1)
+            cv2.putText(img, str(label_to_fdi(int(a['category_id']), 33)), (x, max(y - 4, 12)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        cv2.putText(img, f"id={image_id} {info['width']}x{info['height']} n={len(anns)}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+        name = os.path.splitext(os.path.basename(info['file_name']))[0]
+        cv2_imwrite(os.path.join(vis_dir, f'{image_id:06d}_{name}.jpg'), img)
+    print(f'saved {len(ids)} visualizations to {vis_dir}')
+
+
+def verify_xray_coco_json(json_path: str, base_dir: str = None, check_image_size: bool = True,
+                          vis_dir: str = None, num_vis: int = 20):
+    """재빌드한 json 검증 (docs/troubleshoots/xray_coco_json_segm_eval.md 4.4).
+
+    1) images[].width/height == 실제 이미지 크기
+    2) polygon이 이미지 안에 있고, area/bbox_area 비율이 정상(약 0.6~0.8)인지
+    3) GT를 그대로 예측으로 넣은 self-eval에서 bbox/segm AP == 1.0
+    4) vis_dir를 주면 GT를 원본 이미지에 그린 결과를 num_vis장 저장 (base_dir 필요)
+    """
+    if vis_dir is not None:
+        assert base_dir is not None, 'base_dir is required to save visualizations'
+        visualize_xray_coco_json(json_path, base_dir, vis_dir, num_vis=num_vis)
+    from pycocotools.coco import COCO
+    from pycocotools.cocoeval import COCOeval
+
+    with open(json_path, 'r') as f:
+        d = json.load(f)
+    im = {i['id']: i for i in d['images']}
+    print(f"images: {len(d['images'])}, annotations: {len(d['annotations'])}")
+
+    if check_image_size and base_dir is not None:
+        bad = []
+        for i in tqdm.tqdm(d['images'], desc='image size check'):
+            with Image.open(os.path.join(base_dir, i['file_name'])) as img:
+                if img.size != (i['width'], i['height']):
+                    bad.append((i['file_name'], img.size, (i['width'], i['height'])))
+        print(f'size mismatch: {len(bad)} {bad[:3]}')
+
+    ratios, out_of_image = [], 0
+    for a in d['annotations']:
+        img = im[a['image_id']]
+        x, y, w, h = a['bbox']
+        if 'segmentation' in a:
+            s = np.array(a['segmentation'][0]).reshape(-1, 2)
+            if s[:, 0].max() > img['width'] + 1 or s[:, 1].max() > img['height'] + 1 or s.min() < -1:
+                out_of_image += 1
+        ratios.append(a['area'] / max(w * h, 1e-6))
+    print(f'polygon out of image: {out_of_image}')
+    print(f'area/bbox_area median: {np.median(ratios) if ratios else float("nan"):.3f} (0.6~0.8 정상, 기존 json은 약 0.1)')
+
+    gt = COCO(json_path)
+    stats = {}
+    for iou_type in ['bbox', 'segm']:
+        # loadRes는 bbox 키가 있으면 bbox 기준으로 처리하므로 iou_type별로 키를 나눠서 넣는다
+        drop = 'segmentation' if iou_type == 'bbox' else 'bbox'
+        dets = [{**{k: v for k, v in a.items() if k not in (drop, 'id', 'area')}, 'score': 1.0}
+                for a in gt.dataset['annotations'] if iou_type == 'bbox' or 'segmentation' in a]
+        if iou_type == 'segm':
+            # 예측 결과처럼 RLE로 넣는다 (CocoEvaluator와 동일, loadRes는 결과 segmentation을 RLE로 기대)
+            for det in dets:
+                rle = gt.annToRLE(det)
+                rle['counts'] = rle['counts'].decode('utf-8') if isinstance(rle['counts'], bytes) else rle['counts']
+                det['segmentation'] = rle
+        dt = gt.loadRes(dets)
+        ev = COCOeval(gt, dt, iou_type)
+        ev.evaluate(); ev.accumulate(); ev.summarize()
+        stats[iou_type] = ev.stats[0]
+    # AR@1(maxDets=1)은 같은 이미지에 같은 치아번호가 2개 이상인 경우(유치 매핑, 중복 라벨) 때문에 1.0보다 낮은 게 정상
+    print(f'self-eval AP: {stats} (둘 다 1.0 이어야 정상. 기존 json은 segm이 0)')
+    return stats
+
+
+def test_build_coco_json():
+    base_dir = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays'
+    num_classes = 33
+    out_file = os.path.join(base_dir, f'xray_coco_{num_classes}_seg_v2.json')
+    build_xray_coco_json(
+        img_folder=[
+            'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2',
+            'E:/dataset/reverse_tomosynthesis/kaggle_xrays/kaggle_2222',
+        ],
+        base_dir=base_dir,
+        out_file=out_file,
+        num_classes=num_classes,
+    )
+    verify_xray_coco_json(out_file, base_dir=base_dir)
 
 
         

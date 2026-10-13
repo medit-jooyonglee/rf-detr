@@ -433,6 +433,9 @@ def draw_preditions_boxes(
     with_source_concat=False,
     paste_masks_at_original_size=False,
     input_content_box=None,
+    drawing_mode='mask',
+    polygon_thickness=None,
+    **kwargs
 ):
     """Draw predictions, optionally restoring the rendered output to its original size.
 
@@ -446,7 +449,16 @@ def draw_preditions_boxes(
         input_content_box: Optional valid-image region ``(x0, y0, x1, y1)`` in
             model-input pixels. Use this when the input was letterboxed so boxes,
             masks, and the rendered image are restored without including padding.
+        drawing_mode: ``'mask'`` blends the merged label map (overlapping pixels
+            go to the larger FDI label, so overlaps are hidden). ``'polygon'``
+            draws each instance mask's outer contour as a closed polyline in its
+            label color, so overlaps between neighboring teeth stay visible.
+            The returned label map (``mask_images``) is identical in both modes.
+        polygon_thickness: Contour thickness in pixels for ``'polygon'`` mode.
+            ``None`` scales with the render width (1px per 1000px, e.g. 2px at 2041px).
     """
+    if drawing_mode not in ('mask', 'polygon'):
+        raise ValueError(f"drawing_mode must be 'mask' or 'polygon', got {drawing_mode!r}")
     from trainer import torch_utils
     from rfdetr.datasets.teeth import draw_bboxes
     from trainer import utils_numpy, image_utils, time_strftime, vtk_utils
@@ -700,26 +712,42 @@ def draw_preditions_boxes(
                 and paste_masks_at_original_size
                 and origin_size is not None
             )
-            if (
+            needs_restore = (
                 label_image.shape != (render_height, render_width)
                 or (input_content_box is not None and not mask_is_already_restored)
-            ):
+            )
+
+            def restore_to_render(mask_like):
+                # model-input 좌표의 label/instance 마스크를 render(원본) 크기로 복원
+                if not needs_restore:
+                    return mask_like
                 if input_content_box is not None:
-                    label_image = label_image[
+                    mask_like = mask_like[
                         int(content_y0):int(content_y1),
                         int(content_x0):int(content_x1),
                     ]
-                restore_label_image = cv2.resize(
-                    label_image,
+                return cv2.resize(
+                    mask_like,
                     (render_width, render_height),
                     interpolation=cv2.INTER_NEAREST,
                 )
-            else:
-                restore_label_image = label_image
+
+            restore_label_image = restore_to_render(label_image)
             mask_images.append(restore_label_image)
-            color_label_image = colors[restore_label_image]
-            # image_utils.
-            image = utils_numpy.apply_blending_mask(image, color_label_image)
+            if drawing_mode == 'polygon':
+                # 치아별 외곽선을 따로 그려서 인접 치아 사이 중첩 영역이 보이게 한다 (채우지 않음)
+                thickness = polygon_thickness or max(1, int(round(render_width / 1000)))
+                for instance_mask, instance_label in zip(posit_masks, posit_labels):
+                    instance_mask = restore_to_render(np.ascontiguousarray(instance_mask, dtype=np.uint8))
+                    contours, _ = cv2.findContours(
+                        instance_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
+                    )
+                    color = tuple(int(c) for c in colors[instance_label])
+                    cv2.polylines(image, contours, True, color, thickness, lineType=cv2.LINE_AA)
+            else:
+                color_label_image = colors[restore_label_image]
+                # image_utils.
+                image = utils_numpy.apply_blending_mask(image, color_label_image)
             if with_source_concat:
                 image = np.concatenate([src_image, image], axis=1)
                 

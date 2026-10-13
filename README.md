@@ -304,3 +304,76 @@ xray 데이터셋
 * pretrained-weights
   * xray-panoramic-teeth-seg
      * outputs\pretrained\segmentation\xray_teeth_seg\bounding_bbox_regularization
+
+
+
+
+
+## xray 데이터셋 변환 · 평가 COCO json 빌드
+
+자세한 원인 분석은 [docs/troubleshoots/xray_coco_json_segm_eval.md](docs/troubleshoots/xray_coco_json_segm_eval.md)에 있다.
+
+### 데이터셋별 처리
+
+| 데이터 | 학습 라벨 | 포맷 변환 | 평가 json(`xray_coco_33_seg_v2.json`) |
+|---|---|---|---|
+| ① Kaggle (`xray_teeth_seg_kaggle/.../d2`) | `ann/*.json` (supervisely 원본) | 불필요 | 포함 |
+| ② Tufts (`kaggle_2222`) | `ann/*.json` (`teeth_polygon.pkl`에서 변환) | **필요** (`rfdetr/util/dataloader.py`) | 포함 |
+| ③ 자체 데이터 (`cbct_ios_dcm_latest_0824`) | `annotations.json` (labelme → COCO, 원본 좌표) | labelme repo `labelme2coco.py` (라벨 수정 시에만) | **제외** (train 전용, 420장 전부 train) |
+
+빌드는 두 단계이고, **순서가 중요하다.** 평가 json의 Tufts polygon은 `kaggle_2222/ann/*.json`에서 읽으므로 ① Tufts 포맷 변환을 먼저 하고 ② 평가 json을 빌드한다.
+
+| 단계 | 대상 | 결과 | 명령 |
+|---|---|---|---|
+| ① 포맷 변환 | Tufts만 | `kaggle_2222/ann/*.json` (학습 라벨) | `python -m rfdetr.cli.main --build_tufts` |
+| ② 평가 GT json 빌드 | Kaggle + Tufts를 **한 파일로** | `xray_coco_33_seg_v2.json` | `python -m rfdetr.cli.main --build_json` |
+
+- 평가 json은 반드시 Kaggle과 Tufts가 한 파일에 같이 들어가야 한다. `main.py`는 `annot_file` 하나만 넘기고, `XrayPnoaramicInstanceCoco`가 val의 ①② 이미지가 전부 그 json에 있는지 assert로 확인한다. 데이터셋별로 따로 빌드하면 assert에서 멈춘다.
+- 평가 json은 **원본 이미지 좌표** 기준이다(width/height, bbox, polygon, area 모두 원본). 학습할 때는 기존처럼 resize(너비 640, stride 64)해서 사용하고, 평가 json은 학습 라벨로 쓰이지 않는다.
+
+### 재빌드 명령 (repo 루트)
+
+데이터 경로는 `rfdetr/cli/main.py::train_from_xray_teeth_dir`에 플랫폼별(Windows 로컬 / Linux 서버)로 들어 있는 학습 경로를 그대로 쓴다.
+
+```bash
+# Tufts 변환 + 평가 json 빌드 (한 번에)
+python -m rfdetr.cli.main --build_tufts --build_json
+
+# 따로 실행할 때
+python -m rfdetr.cli.main --build_tufts   # Tufts 포맷 변환 + 변환 점검
+python -m rfdetr.cli.main --build_json    # 평가 json(Kaggle + Tufts) 빌드 + 검증
+```
+
+- `--build_tufts`
+  - 기존 `kaggle_2222/ann`은 `ann_backup_{시각}`으로 자동 백업한다.
+  - 변환 후 원본과 비교한 결과를 출력한다. `iou(raw,converted)` 평균이 약 0.99이고 `images_missing_in_converted`가 0이면 정상이다.
+- `--build_json`
+  - `xray_coco_33_seg_v2.json`을 만든다. 기존 `_v2.json`은 `_v2_backup_{시각}.json`으로 자동 백업한다.
+  - 빌드 후 검증 결과(이미지 크기 불일치 0, GT 자기 자신 평가 AP 약 1.0)를 출력하고, GT 시각화 20장을 `outputs/xray_coco_json_vis/`에 저장한다.
+- 두 옵션을 같이 주면 Tufts 변환을 먼저 하고 json을 빌드한다. 빌드가 끝나면 학습하지 않고 종료한다.
+
+빌드가 끝나면 서버로 복사하고 `--eval`로 확인한다.
+
+- `kaggle_2222/ann` 폴더와 `xray_coco_33_seg_v2.json`을 `/data1/jooyonglee/reverse_tomo/xray_panoramic/`에 복사한다.
+- `main.py`는 `_v2.json`이 있으면 자동으로 그 파일을 쓰고, 없으면 경고를 띄운 뒤 기존 json을 쓴다.
+- `--eval` 결과에서 segm AP가 0이 아닌 정상 범위인지, bbox의 area별 지표(large 등)가 `-1`이 아닌지 확인한다.
+
+### 검증 · 점검 도구
+
+| 목적 | 명령 / 함수 |
+|---|---|
+| 평가 json 검사: 이미지 크기 일치, area 비율, GT 자기 자신 평가(bbox/segm AP 약 1.0) | `verify_xray_coco_json(json, base_dir, vis_dir=None)` (`rfdetr/datasets/xraypanoramic.py`) |
+| 평가 json GT를 원본 이미지에 그려 저장 | `visualize_xray_coco_json(json, base_dir, vis_dir, num_vis=20)` |
+| 데이터셋별 치아 간 중첩 라벨 통계 + 중첩 큰 순 시각화 | `python -m rfdetr.datasets.xray_overlap_stats --num_samples 100` (`--datasets kaggle tufts own tufts_raw`) |
+| Tufts 원본 vs 변환본 비교 | `python -m rfdetr.datasets.xray_overlap_stats --check_tufts_conversion [--ann_dir <폴더>]` |
+| 추론 결과에서 치아 간 중첩 확인 (외곽선만 그림) | `python -m rfdetr.deploy.predict --test-path <폴더> --save-dir <폴더> --drawing-mode polygon [--polygon-thickness N]` |
+
+### 주의사항
+
+- **서버에도 `ann`을 복사해야 한다.** 서버 학습은 `/data1/.../kaggle_2222/ann`을 읽는다. json만 올리면 학습은 기존의 깎인 Tufts 라벨로 계속 진행된다.
+- **`--build_tufts`는 `kaggle_2222/ann`을 새로 만든다.** 기존 폴더는 `ann_backup_{시각}`으로 자동 백업되니, 확인 후 필요 없으면 지운다. (예전 `dataloader.py`는 import만 해도 변환이 실행됐는데, 지금은 명시적으로 실행할 때만 동작한다.)
+- **기존 체크포인트의 평가 수치가 달라진다.** 기존 체크포인트는 깎인 Tufts 마스크(이전 변환 코드, 면적 평균 -12%)로 학습됐고, 새 평가 GT는 중첩이 들어간 원본 크기다. Tufts val 이미지의 segm 수치가 그만큼 낮게 나올 수 있다. 새 라벨의 효과는 재학습해야 반영된다.
+- **중첩 라벨 방식이 데이터셋마다 다르다.** 파노라마에서 겹쳐 보이는 인접 치아 영역을 양쪽 치아에 모두 라벨한 비율(인접 쌍 기준, 100장 표본)은 ① Kaggle 27.6%, ② Tufts 77%, ③ 자체 9.8%다. `rfdetr/deploy/predict.py`의 mask 병합은 겹친 픽셀을 FDI 번호가 큰 치아에 주는 방식(`np.max`)이라 중첩이 보이지 않는다. 확인하려면 `--drawing-mode polygon`을 쓴다.
+- **유치 번호 중복이 남아 있다.** Tufts의 유치를 영구치 번호로 매핑(`T→29` 등)하기 때문에 혼합치열 이미지에서 같은 번호가 두 개 생긴다(100장 표본에서 40쌍). Kaggle 원본에도 같은 번호 중복 라벨이 일부 있다. GT 자기 자신 평가에서 AP는 1.0이지만, AR@maxDets=1이 약 0.977로 나오는 건 이 중복 때문이다(이미지·치아번호당 예측 1개만 인정).
+- **③ 자체 데이터는 평가에 들어가지 않는다.** `xraypanoramic.py::build()`가 train일 때만 `coco_directories`를 넘긴다. ③도 평가하려면 train/val split을 추가해야 한다(미구현).
+- `rfdetr/datasets/xray_overlap_stats.py`의 `own` 시각화 파일명에는 환자 이름이 들어간다. 외부로 공유할 때 주의한다.

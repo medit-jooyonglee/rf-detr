@@ -93,12 +93,18 @@ def resize_image(image, stride=64, target_width=640, resize_hw=None):
     return canvas, content_box
 
 
-def main(use_ema=True, with_source_concat=False):
+def main(*, 
+         use_ema=True, with_source_concat=False,
+         test_path='', 
+         save_dir = 'temp/resultsxray',
+         drawing_mode='mask',
+         polygon_thickness=None,
+         **kwargs):
     # FIXME: save_path
     from trainer import diskmanager, image_utils
-    save_dir = f'results/test/0828'
+    # save_dir = f'results/test/0828'
     model = init_and_get_model(export=False, use_ema=use_ema)
-    
+    assert drawing_mode in ['mask', 'polygon'], "Invalid drawing mode specified."
     # model = rf_detr.model.model
     
         # ''
@@ -111,11 +117,12 @@ def main(use_ema=True, with_source_concat=False):
     # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_teeth_seg_kaggle/Teeth Segmentation PNG/d2/img/'
     # path = 'E:/dataset/reverse_tomosynthesis/cbct_ios_dcm'
     # path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON'
-    path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm/'
+    # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm/'
+    path = test_path
     # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_0824/JPEGImages/'
     # path = 
     
-    mask_save_dir = 'temp/resultsxray'
+    mask_save_dir = save_dir # 'temp/resultsxray'
     found = diskmanager.deep_search_files(path, exts=['.jpg', '.jpeg'])
     # found = glob.glob(f'{path}/*.jpg')
     i_break = 30
@@ -145,9 +152,11 @@ def main(use_ema=True, with_source_concat=False):
                     with_source_concat=with_source_concat,
                     paste_masks_at_original_size=True,
                     input_content_box=input_content_box,
+                    drawing_mode=drawing_mode,
+                    polygon_thickness=polygon_thickness,
                 )
-                
-                
+
+
                 assert len(mask_iamge) == 1, "Expected a single mask image."
                 savename = os.path.join(mask_save_dir, os.path.relpath(file, path))
                 os.makedirs(os.path.dirname(savename), exist_ok=True)
@@ -436,7 +445,8 @@ def inference_libtorch_model_main():
         
 
 
-def predict_wrapper(img, model=None):
+def predict_wrapper(img, model=None,
+                    drawing_mode='mask'):
     if model is None:
         model = init_and_get_model(export=False, use_ema=True)
     if img.ndim ==3:
@@ -484,6 +494,8 @@ def predict_wrapper(img, model=None):
                 with_source_concat=False,
                 paste_masks_at_original_size=True,
                 input_content_box=input_content_box,
+                drawing_mode=drawing_mode,
+                
             )
             
     return color_image[0], mask_iamge[0]
@@ -504,9 +516,42 @@ if __name__ == '__main__':
         default=False,
         help='Concatenate source image with output for visualization (default: disabled).',
     )
+    
+    parser.add_argument(
+        '--test-path',
+        type=str,
+        default='',
+        help='Path to the test images.',
+    )
+    parser.add_argument(
+        '--save-dir',
+        type=str,
+        default='temp/resultsxray',
+        help='Directory to save the results.',
+    )
+    parser.add_argument(
+        '--drawing-mode', '--drawing_mode',
+        dest='drawing_mode',
+        type=str,
+        default='mask',
+        choices=['mask', 'polygon'],
+        help="mask: 병합 label map 채우기 (겹친 영역은 FDI 큰 치아로 덮임). "
+             "polygon: 치아별 외곽선만 그려서 인접 치아 중첩 영역 확인.",
+    )
+    parser.add_argument(
+        '--polygon-thickness', '--polygon_thickness',
+        dest='polygon_thickness',
+        type=int,
+        default=None,
+        help='polygon 모드 선 두께(px). 미지정 시 원본 너비 1000px당 1px (2041px -> 2px).',
+    )
     cli_args = parser.parse_args()
-    main(use_ema=cli_args.use_ema,
-         with_source_concat=cli_args.with_source_concat)
+    main(
+        **vars(cli_args),
+    )
+    # 
+    # main(use_ema=cli_args.use_ema,
+        #  with_source_concat=cli_args.with_source_concat, **)
     # export_libtorch('outputs/temp.pt', shape=(384, 704), dtype=torch.float16)
     # coreml_export_main()
     # test_coreml_inference()
