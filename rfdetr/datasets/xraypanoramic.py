@@ -264,13 +264,52 @@ class XrayPnoramic(Dataset):
         src, target = self.coco_apis[index]
         src = np.array(src)
 
-        
+        # xray_crop_mode: 원본 해상도 마스크를 직접 crop (③ 자체 데이터, category id = universal 번호)
+        crop_plan = None
+        if resizing:
+            crop_plan = self._sample_crop_plan(
+                np.asarray(target['boxes'], dtype=np.float32).reshape(-1, 4),
+                np.asarray(target['labels']).reshape(-1),
+                src.shape[:2],
+            )
+        if crop_plan is not None:
+            from rfdetr.datasets.xray_crop_aug import corner_mask
+            cx0, cy0, cx1, cy1 = [int(v) for v in crop_plan['box']]
+            keep = crop_plan['keep']
+            src = src[cy0:cy1, cx0:cx1].copy()
+            labels = np.asarray(target['labels']).reshape(-1)[keep]
+            iscrowd = np.asarray(target['iscrowd']).reshape(-1)[keep]
+            valid = None
+            if crop_plan['corner'] is not None:
+                valid = corner_mask(src.shape[0], src.shape[1], *crop_plan['corner'])
+                src = src * (valid[..., None] if src.ndim == 3 else valid)
+            if target.get('masks') is not None:
+                masks = np.asarray(target['masks'])[keep][:, cy0:cy1, cx0:cx1]
+                if valid is not None:
+                    masks = masks & valid.astype(bool)[None]
+                boxes, area = self._boxes_from_masks(masks)
+                visible = area >= 16
+                masks, boxes, area = masks[visible], boxes[visible], area[visible]
+                target = dict(target, masks=masks)
+            else:
+                boxes = np.asarray(target['boxes'], dtype=np.float32).reshape(-1, 4)[keep]
+                boxes = boxes - np.array([cx0, cy0, cx0, cy0], dtype=np.float32)
+                boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0, src.shape[1])
+                boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, src.shape[0])
+                visible = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
+                boxes = boxes[visible]
+                area = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+            target = dict(target, boxes=boxes, labels=labels[visible], area=area, iscrowd=iscrowd[visible],
+                          orig_size=np.array(src.shape[:2]))
+
         # src = np.arr
         if resizing:
 
-                
+
             # self.resize_image_and_target(src, target)
             target_rsz_img = self.get_target_image_size(src.shape[:2])
+            if crop_plan is not None and crop_plan['target_hw'] is not None:
+                target_rsz_img = crop_plan['target_hw']
             resizer = ResizeCocoSample(target_rsz_img)
             rsz_src, rsz_target = resizer(src, target)
             rsz_src = np.transpose(rsz_src, [2, 0, 1]) if rsz_src.ndim == 3 else rsz_src[None, ...]
@@ -450,7 +489,22 @@ class XrayPnoaramicInstance(XrayPnoramic):
                  bg_crop_prob=0.15,
                  augment_en=True,
                  coco_directories: List[Tuple[str, str]]=None,
+                 xray_crop_mode: Union[None, str, List[str], Dict[str, float]] = None,
+                 xray_crop_prob: Union[float, List[float]] = 1.0,
+                 xray_crop_cfg: Optional[Dict] = None,
                  **kwargs):
+        """
+        xray_crop_mode: 학습 샘플 crop 방식 (기본 None: 비활성, 기존과 동일). train split에만 적용.
+            'periapical' : 치근단 방사선 모사 (이웃 치아 3~5개, 상악/하악/상하악 노출, 사선/둥근 모서리)
+            'teeth_roi'  : two-pass 2차 입력 (전체 치아 영역 + margin, 비관심 영역 제거)
+            여러 개 동시 사용: ['periapical', 'teeth_roi'], 'periapical,teeth_roi', {'periapical': 0.3, 'teeth_roi': 0.3}
+            상세 규칙/파라미터는 rfdetr/datasets/xray_crop_aug.py
+        xray_crop_prob: mode별 선택 확률. float면 모든 mode에 같은 값, list면 mode 순서대로.
+            샘플마다 mode 하나를 확률대로 고르고 나머지(1 - 합)는 전체 영상. 합이 1을 넘으면 비율로 정규화
+            (예: 두 mode 모두 1.0 -> 0.5 / 0.5, 전체 영상 0%. 두 mode 0.3 -> 0.3 / 0.3 / 전체 영상 0.4)
+        xray_crop_cfg: xray_crop_aug.DEFAULT_PERIAPICAL / DEFAULT_TEETH_ROI 덮어쓸 값.
+            {'periapical': {...}, 'teeth_roi': {...}} 로 mode별 지정 가능
+        """
 
         default_splits = {
             'train': (0, 0.85),
@@ -511,6 +565,40 @@ class XrayPnoaramicInstance(XrayPnoramic):
         
         self.albu_transform = create_albu_transform()
         # self.mapping[fdi_sort] = np.arange(1, 33)
+
+        from rfdetr.datasets.xray_crop_aug import normalize_crop_modes, split_crop_cfg
+        # {mode: 샘플당 선택 확률}. 비어 있으면 crop 비활성
+        self.xray_crop_modes = normalize_crop_modes(xray_crop_mode, xray_crop_prob)
+        self.xray_crop_cfg = split_crop_cfg(xray_crop_cfg, self.xray_crop_modes)
+        if self.xray_crop_modes and name == 'train':
+            full_prob = max(0.0, 1.0 - sum(self.xray_crop_modes.values()))
+            logger.info(f'xray crop augmentation: probs={self.xray_crop_modes}, full_image={full_prob:.2f}, '
+                        f'cfg={self.xray_crop_cfg}')
+
+    def _sample_crop_plan(self, boxes_xyxy, labels, img_hw):
+        """원본 해상도 기준 crop 계획 (xray_crop_aug.sample_crop). 비활성/전체 영상 선택/실패 시 None."""
+        if not self.xray_crop_modes or self.name != 'train' or len(boxes_xyxy) == 0:
+            return None
+        from rfdetr.datasets.xray_crop_aug import pick_crop_mode, sample_crop
+        mode = pick_crop_mode(self.xray_crop_modes, np.random)
+        if mode is None:
+            return None
+        plan = sample_crop(mode, boxes_xyxy, labels, img_hw, np.random, train=True,
+                           cfg=self.xray_crop_cfg[mode])
+        if plan is None or not plan['keep'].any():
+            return None
+        return plan
+
+    @staticmethod
+    def _boxes_from_masks(masks):
+        """[N, H, W] bool -> (xyxy [N, 4] float32, area [N])."""
+        boxes = np.zeros((len(masks), 4), dtype=np.float32)
+        area = masks.reshape(len(masks), -1).sum(axis=1) if len(masks) else np.zeros([0])
+        for i, m in enumerate(masks):
+            ys, xs = np.nonzero(m)
+            if len(xs):
+                boxes[i] = [xs.min(), ys.min(), xs.max() + 1, ys.max() + 1]
+        return boxes, area
 
     @staticmethod
     def _no_overlap(crop_box, bboxes_xyxy):
@@ -700,6 +788,27 @@ class XrayPnoaramicInstance(XrayPnoramic):
         bboxes = np.array([obj['bbox'] for obj in annot_data], dtype=np.float32).reshape(-1, 4)
         # ()
         class_labels = np.array([int(obj['class_title']) for obj in annot_data], dtype=np.int64)
+
+        # xray_crop_mode (periapical / teeth_roi): 원본 해상도에서 crop 후 이하 기존 파이프라인 그대로.
+        # 라벨 매핑 전(universal 번호)이라 상악/하악 구분이 가능하다.
+        crop_plan = self._sample_crop_plan(bboxes, class_labels, src.shape[:2])
+        crop_valid = None  # PA 모서리 유효영역 (1: 영상, 0: 잘린 모서리)
+        if crop_plan is not None:
+            from rfdetr.datasets.xray_crop_aug import corner_mask
+            cx0, cy0, cx1, cy1 = [int(v) for v in crop_plan['box']]
+            keep = crop_plan['keep']
+            src = src[cy0:cy1, cx0:cx1].copy()
+            offset = np.array([cx0, cy0], dtype=np.float32)
+            bboxes = bboxes[keep] - np.tile(offset, 2)
+            class_labels = class_labels[keep]
+            annot_data = [
+                dict(annot, segmentation=(np.asarray(annot['segmentation'], dtype=np.float32) - offset).tolist())
+                for annot, k in zip(annot_data, keep) if k
+            ]
+            if crop_plan['corner'] is not None:
+                crop_valid = corner_mask(src.shape[0], src.shape[1], *crop_plan['corner'])
+                src = src * crop_valid
+
         # annotation이 없는 이미지는 아래에서 랜덤 가짜 박스(class 0)를 만든다. 평가 GT json에는 넣으면 안 되므로 표시해 둔다.
         is_dummy = False
         if bboxes.size == 0 and class_labels.size == 0:
@@ -741,10 +850,13 @@ class XrayPnoaramicInstance(XrayPnoramic):
         # target = target[..., 0] if target.ndim == 3 else target # instance id만 남기기 (0: 배경)
         # 
         target_img_size = self.get_target_image_size(src.shape[:2])
+        if crop_plan is not None and crop_plan['target_hw'] is not None:
+            target_img_size = crop_plan['target_hw']  # PA: 긴 변 기준 크기 (가로형/세로형)
         cv_size = tuple(target_img_size[::-1])
         src_rsz = cv2.resize(src, cv_size, interpolation=cv2.INTER_LINEAR)
         src_rsz = np.repeat(src_rsz[..., None], 3, axis=-1) if src_rsz.ndim == 2 else src_rsz
         scale_wh = np.array(cv_size) / np.array(src.shape[::-1])
+        rsz_valid = cv2.resize(crop_valid, cv_size, interpolation=cv2.INTER_NEAREST) if crop_valid is not None else None
         
         rsz_bboxes = (bboxes.reshape([-1, 2]) * scale_wh).reshape(bboxes.shape)
 
@@ -788,16 +900,20 @@ class XrayPnoaramicInstance(XrayPnoramic):
         # rsz_bboxes_labels = np.concatenate([rsz_bboxes, np.zeros([rsz_bboxes.shape[0], 1])], axis=-1)
         kept_bbox_indices = np.arange(rsz_bboxes.shape[0], dtype=np.int64)
         if self.name == 'train' and self.augment_en:
+            extra_targets = {} if rsz_valid is None else {'mask': rsz_valid}  # 회전 등 기하 변환을 모서리 마스크에도 적용
             transformed = self.albu_transform(
-                image=src_rsz, 
-                bboxes=rsz_bboxes, 
+                image=src_rsz,
+                bboxes=rsz_bboxes,
                 bbox_indices=kept_bbox_indices,
                 # class_labels=class_labels,
                 keypoints=rsz_polygons,
                 polygons_indices=polygons_indices,
+                **extra_targets,
             )
-            
+
             src_rsz = transformed['image']
+            if rsz_valid is not None:
+                rsz_valid = transformed['mask']
             rsz_bboxes = np.asarray(transformed['bboxes'], dtype=np.float32).reshape(-1, 4)
             kept_bbox_indices = np.asarray(
                 transformed['bbox_indices'], dtype=np.int64
@@ -885,6 +1001,16 @@ class XrayPnoaramicInstance(XrayPnoramic):
             else:
                 masks = np.zeros([bboxes.shape[0], *src_rsz.shape[:2]], dtype=np.bool_)
 
+            if crop_plan is not None and len(masks) == len(rsz_bboxes) and len(masks) > 0:
+                # crop 경계/PA 모서리에서 잘린 부분을 마스크에서 빼고, bbox를 보이는 마스크 기준으로 다시 계산
+                if rsz_valid is not None:
+                    masks &= rsz_valid.astype(bool)[None]
+                mask_boxes, mask_area = self._boxes_from_masks(masks)
+                visible = mask_area >= 16  # 거의 안 보이는 치아(가장자리 몇 px)는 제외
+                masks, rsz_bboxes = masks[visible], mask_boxes[visible]
+                bboxes, class_labels = bboxes[visible], class_labels[visible]
+                kept_bbox_indices = kept_bbox_indices[visible]
+                polygon_segmentation = [p for p, v in zip(polygon_segmentation, visible) if v]
 
             area = masks.reshape(masks.shape[0], -1).sum(axis=1) if masks.size > 0 else np.zeros([0])
         else:
@@ -992,6 +1118,7 @@ class XrayPnoaramicInstance(XrayPnoramic):
 
         # GT에는 augmentation(회전 등)이 들어가면 안 된다
         prev_augment, self.augment_en = self.augment_en, False
+        prev_crop, self.xray_crop_modes = self.xray_crop_modes, {}  # GT는 항상 원본 전체 영상 기준
         num_coco = len(self.coco_apis) if self.coco_apis is not None else 0
         skipped = {"coco_apis_image": 0, "dummy_image": 0, "no_segmentation": 0, "empty_box": 0}
         try:
@@ -1056,6 +1183,7 @@ class XrayPnoaramicInstance(XrayPnoramic):
                     break
         finally:
             self.augment_en = prev_augment
+            self.xray_crop_modes = prev_crop
 
         print(f"coco_json_export: images={len(images)}, annotations={len(annotations)}, skipped={skipped}")
         return coco_json
@@ -1427,10 +1555,10 @@ def test_load_coco_dataset():
     # img_folder = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2'
     # path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle'
     kaggle_path2 = [
-        # 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/kaggle_2222',
-        # 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2',
-        '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2/',
-        '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/',
+        'E:/dataset/reverse_tomosynthesis/kaggle_xrays/kaggle_2222',
+        'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2',
+        # '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2/',
+        # '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/',
     ]
     
     # ann_file = ''
@@ -1439,7 +1567,10 @@ def test_load_coco_dataset():
     # path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle'
     # xray_coco.json'
     
-    annot_file = '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_coco_33_seg.json'
+    # annot_file = '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_coco_33_seg.json'
+    annot_file = '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_coco_33_seg_v2.json'
+    
+    
     # annot_file = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/xray_coco_33_seg.json'
     # annot_file = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_coco_33_seg.json' 
     annot_file = None
@@ -1454,13 +1585,18 @@ def test_load_coco_dataset():
         # os.path.join(path, 'xray_coco.json'),
         # None,
         None,
+        xray_crop_mode=['periapical', 'teeth_roi'],  # None | 'periapical' | 'teeth_roi'
+        xray_crop_prob=1.0,
+        # xray_crop_mode
         include_masks=True,
+
         num_classes=32,
         name='train',
                 coco_directories=[
-            # ('E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm', 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm/annotations.json')
-            ('/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm/',
-             '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm/annotations.json')
+            ('E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm', \
+                'E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm/annotations.json')
+            # ('/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm/',
+            #  '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm/annotations.json')
         ],
         # splits={
             # 'train': (0, 0.)
@@ -1530,7 +1666,9 @@ def test_load_coco_dataset():
                 drawing = utils_numpy.apply_blending_mask(drawing, target_fdi_color_image, alpha=0.5)
             
         os.makedirs(save_dir, exist_ok=True)
-        cv2.imwrite(f'{save_dir}/xray_{i}.png', drawing[..., ::-1])
+        save_name = f'{save_dir}/xray_{i}.png'
+        cv2.imwrite(save_name, drawing[..., ::-1])
+        logger.info(f"Saved visualization to: {save_name}")
         
             
         # print(f"Input shapes: {shape_stats['inputs']}")

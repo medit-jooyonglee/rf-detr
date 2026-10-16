@@ -93,18 +93,228 @@ def resize_image(image, stride=64, target_width=640, resize_hw=None):
     return canvas, content_box
 
 
+
+def is_adjacent_fdi(fdi_a, fdi_b):
+    """같은 quadrant에서 번호가 1 차이 나거나 정중선(11-21, 31-41)을 사이에 둔 인접 치아인지."""
+    qa, na = divmod(int(fdi_a), 10)
+    qb, nb = divmod(int(fdi_b), 10)
+    if qa == qb:
+        return abs(na - nb) == 1
+    return na == 1 and nb == 1 and {qa, qb} in ({1, 2}, {3, 4})
+
+
+def compute_tooth_overlaps(instance_result, file_key=''):
+    """인스턴스(치아) 마스크 간 중첩 영역을 계산한다.
+
+    Returns:
+        tooth_rows: 치아별 면적/중첩 면적/중첩 비율
+        pair_rows: 중첩이 있는 치아 쌍별 교집합 면적, IoU, 작은 치아 대비 비율
+        overlap_map: 2개 이상 치아가 겹친 픽셀 (H, W) bool
+    """
+    masks = instance_result['masks']
+    fdis = instance_result['fdi']
+    scores = instance_result['scores']
+    if len(masks) == 0:
+        return [], [], None
+    areas = masks.reshape(len(masks), -1).sum(axis=1)
+    count_map = masks.sum(axis=0, dtype=np.uint8)
+    overlap_map = count_map >= 2
+
+    # 마스크 bbox 로 후보 쌍을 거른 뒤 교집합 계산
+    mask_boxes = []
+    for mask in masks:
+        ys, xs = np.nonzero(mask)
+        mask_boxes.append(
+            (xs.min(), ys.min(), xs.max() + 1, ys.max() + 1) if len(xs) else None
+        )
+    pair_rows = []
+    pair_px = defaultdict(dict)
+    for a in range(len(masks)):
+        for b in range(a + 1, len(masks)):
+            box_a, box_b = mask_boxes[a], mask_boxes[b]
+            if box_a is None or box_b is None:
+                continue
+            x0, y0 = max(box_a[0], box_b[0]), max(box_a[1], box_b[1])
+            x1, y1 = min(box_a[2], box_b[2]), min(box_a[3], box_b[3])
+            if x0 >= x1 or y0 >= y1:
+                continue
+            inter = int(np.logical_and(masks[a, y0:y1, x0:x1], masks[b, y0:y1, x0:x1]).sum())
+            if inter == 0:
+                continue
+            union = int(areas[a] + areas[b] - inter)
+            fdi_a, fdi_b = sorted((int(fdis[a]), int(fdis[b])))
+            pair_px[a][b] = pair_px[b][a] = inter
+            pair_rows.append({
+                'file': file_key,
+                'fdi_a': fdi_a,
+                'fdi_b': fdi_b,
+                'adjacent': is_adjacent_fdi(fdi_a, fdi_b),
+                'inter_px': inter,
+                'iou': inter / max(union, 1),
+                'inter_over_min_area': inter / max(min(areas[a], areas[b]), 1),
+            })
+
+    tooth_rows = []
+    for k in range(len(masks)):
+        area = int(areas[k])
+        overlap_px = int(np.logical_and(masks[k], overlap_map).sum())
+        neighbors = pair_px.get(k, {})
+        top = max(neighbors.items(), key=lambda kv: kv[1]) if neighbors else None
+        tooth_rows.append({
+            'file': file_key,
+            'fdi': int(fdis[k]),
+            'score': float(scores[k]),
+            'area_px': area,
+            'overlap_px': overlap_px,
+            'overlap_ratio': overlap_px / max(area, 1),
+            'num_overlap_neighbors': len(neighbors),
+            'neighbors': ' '.join(
+                f'{int(fdis[j])}:{px}' for j, px in sorted(neighbors.items(), key=lambda kv: -kv[1])
+            ),
+            'max_neighbor_fdi': int(fdis[top[0]]) if top else '',
+            'max_neighbor_px': top[1] if top else 0,
+        })
+    return tooth_rows, pair_rows, overlap_map
+
+
+def draw_overlap_highlight(color_image, overlap_map, color=(255, 0, 0), alpha=0.6):
+    """polygon 렌더 위에 중첩 픽셀을 반투명 색으로 칠한다 (RGB)."""
+    image = color_image.astype(np.float32).copy()
+    image[overlap_map] = image[overlap_map] * (1 - alpha) + np.array(color, np.float32) * alpha
+    return image.astype(np.uint8)
+
+
+def write_overlap_report(tooth_rows, pair_rows, save_dir, image_count):
+    import csv
+    os.makedirs(save_dir, exist_ok=True)
+
+    def write_csv(name, rows):
+        path = os.path.join(save_dir, name)
+        if rows:
+            with open(path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+                writer.writeheader()
+                writer.writerows(rows)
+        return path
+
+    write_csv('overlap_per_tooth.csv', tooth_rows)
+    write_csv('overlap_pairs.csv', pair_rows)
+
+    # FDI 별 집계
+    by_fdi = defaultdict(list)
+    for row in tooth_rows:
+        by_fdi[row['fdi']].append(row)
+    fdi_rows = []
+    for fdi in sorted(by_fdi):
+        rows = by_fdi[fdi]
+        ratios = np.array([r['overlap_ratio'] for r in rows])
+        overlap_px = np.array([r['overlap_px'] for r in rows])
+        fdi_rows.append({
+            'fdi': fdi,
+            'n_detected': len(rows),
+            'n_with_overlap': int((overlap_px > 0).sum()),
+            'pct_with_overlap': 100.0 * (overlap_px > 0).mean(),
+            'mean_area_px': float(np.mean([r['area_px'] for r in rows])),
+            'mean_overlap_px': float(overlap_px.mean()),
+            'mean_overlap_ratio_pct': 100.0 * ratios.mean(),
+            'median_overlap_ratio_pct': 100.0 * np.median(ratios),
+            'p95_overlap_ratio_pct': 100.0 * np.percentile(ratios, 95),
+            'max_overlap_ratio_pct': 100.0 * ratios.max(),
+        })
+    write_csv('overlap_summary_by_fdi.csv', fdi_rows)
+
+    by_pair = defaultdict(list)
+    for row in pair_rows:
+        by_pair[(row['fdi_a'], row['fdi_b'])].append(row)
+    pair_summary = []
+    for (fa, fb), rows in by_pair.items():
+        pair_summary.append({
+            'fdi_a': fa,
+            'fdi_b': fb,
+            'adjacent': rows[0]['adjacent'],
+            'n_images': len(rows),
+            'mean_inter_px': float(np.mean([r['inter_px'] for r in rows])),
+            'max_inter_px': int(np.max([r['inter_px'] for r in rows])),
+            'mean_iou_pct': 100.0 * float(np.mean([r['iou'] for r in rows])),
+            'mean_inter_over_min_pct': 100.0 * float(np.mean([r['inter_over_min_area'] for r in rows])),
+        })
+    pair_summary.sort(key=lambda r: (-r['n_images'], -r['mean_inter_px']))
+    write_csv('overlap_summary_by_pair.csv', pair_summary)
+
+    total_area = sum(r['area_px'] for r in tooth_rows)
+    total_overlap = sum(r['overlap_px'] for r in tooth_rows)
+    n_non_adjacent = sum(1 for r in pair_rows if not r['adjacent'])
+    lines = [
+        '# Per-tooth overlap report',
+        '',
+        f'- images: {image_count}',
+        f'- detected teeth: {len(tooth_rows)}',
+        f'- teeth with overlap: {sum(1 for r in tooth_rows if r["overlap_px"] > 0)}',
+        f'- overlapping pairs: {len(pair_rows)} (non-adjacent: {n_non_adjacent})',
+        f'- overlapped tooth pixels / total tooth pixels: {100.0 * total_overlap / max(total_area, 1):.2f}%',
+        '',
+        '## By FDI',
+        '',
+        '| FDI | n | overlap>0 (%) | mean ratio (%) | median (%) | p95 (%) | max (%) |',
+        '|---|---|---|---|---|---|---|',
+    ]
+    for r in fdi_rows:
+        lines.append(
+            f"| {r['fdi']} | {r['n_detected']} | {r['pct_with_overlap']:.1f} | "
+            f"{r['mean_overlap_ratio_pct']:.2f} | {r['median_overlap_ratio_pct']:.2f} | "
+            f"{r['p95_overlap_ratio_pct']:.2f} | {r['max_overlap_ratio_pct']:.2f} |"
+        )
+    lines += [
+        '',
+        '## Top pairs (by frequency)',
+        '',
+        '| pair | adjacent | n images | mean px | max px | mean IoU (%) | mean inter/min (%) |',
+        '|---|---|---|---|---|---|---|',
+    ]
+    for r in pair_summary[:30]:
+        lines.append(
+            f"| {r['fdi_a']}-{r['fdi_b']} | {r['adjacent']} | {r['n_images']} | "
+            f"{r['mean_inter_px']:.0f} | {r['max_inter_px']} | {r['mean_iou_pct']:.2f} | "
+            f"{r['mean_inter_over_min_pct']:.2f} |"
+        )
+    top_teeth = sorted(tooth_rows, key=lambda r: -r['overlap_ratio'])[:20]
+    lines += [
+        '',
+        '## Worst teeth (highest overlap ratio)',
+        '',
+        '| file | FDI | area px | overlap px | ratio (%) | neighbors (fdi:px) |',
+        '|---|---|---|---|---|---|',
+    ]
+    for r in top_teeth:
+        lines.append(
+            f"| {r['file']} | {r['fdi']} | {r['area_px']} | {r['overlap_px']} | "
+            f"{100.0 * r['overlap_ratio']:.2f} | {r['neighbors']} |"
+        )
+    report_path = os.path.join(save_dir, 'overlap_report.md')
+    with open(report_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines) + '\n')
+    print(f'Saved overlap report to: {report_path}')
+    return report_path
+
+
 def main(*, 
          use_ema=True, with_source_concat=False,
          test_path='', 
          save_dir = 'temp/resultsxray',
          drawing_mode='mask',
          polygon_thickness=None,
+         overlap_report=None,
+         max_images=None,
          **kwargs):
     # FIXME: save_path
     from trainer import diskmanager, image_utils
     # save_dir = f'results/test/0828'
     model = init_and_get_model(export=False, use_ema=use_ema)
     assert drawing_mode in ['mask', 'polygon'], "Invalid drawing mode specified."
+    if overlap_report is None:
+        overlap_report = drawing_mode == 'polygon'
+    all_tooth_rows, all_pair_rows = [], []
+    processed_count = 0
     # model = rf_detr.model.model
     
         # ''
@@ -123,12 +333,16 @@ def main(*,
     # path = 
     
     mask_save_dir = save_dir # 'temp/resultsxray'
-    found = diskmanager.deep_search_files(path, exts=['.jpg', '.jpeg'])
+    found = diskmanager.deep_search_files(path, exts=['.jpg', '.jpeg', 'JPG', 'JPEG'])
+    
+    print('emtpy images')
     # found = glob.glob(f'{path}/*.jpg')
     i_break = 30
     for idx, file in enumerate(found):
         # if idx > i_break:
             # break
+        if max_images is not None and idx >= max_images:
+            break
         # img = cv2.imread(file, cv2.IMREAD_GRAYSCALE)
         img = image_utils.cv2_imread(file, flags=cv2.IMREAD_GRAYSCALE)
         rsz_img, input_content_box = resize_image(img, stride=64)
@@ -144,6 +358,7 @@ def main(*,
                 print(outputs['pred_masks'].shape)
         
             try:
+                instance_results = [] if overlap_report else None
                 color_image, mask_iamge = draw_preditions_boxes(
                     img_tensor, outputs, save=False, origin_size=img.shape[:2],
                                         segmentation_mode='crop_and_resize',
@@ -154,6 +369,7 @@ def main(*,
                     input_content_box=input_content_box,
                     drawing_mode=drawing_mode,
                     polygon_thickness=polygon_thickness,
+                    instance_results=instance_results,
                 )
 
 
@@ -165,10 +381,25 @@ def main(*,
                 image_utils.cv2_imwrite(savename.replace('.jpg', '.png'), mask_iamge[0].astype(np.uint8))
                 image_utils.cv2_imwrite(savename, color_image[0].astype(np.uint8)[..., ::-1])  # Convert RGB to BGR for saving with OpenCV
                 print(f"Saved mask image to: {savename.replace('.jpg', '.png')}")
+                processed_count += 1
+
+                if overlap_report:
+                    file_key = os.path.relpath(file, path)
+                    tooth_rows, pair_rows, overlap_map = compute_tooth_overlaps(
+                        instance_results[0], file_key=file_key
+                    )
+                    all_tooth_rows.extend(tooth_rows)
+                    all_pair_rows.extend(pair_rows)
+                    if overlap_map is not None:
+                        highlight = draw_overlap_highlight(color_image[0], overlap_map)
+                        stem, ext = os.path.splitext(savename)
+                        image_utils.cv2_imwrite(f'{stem}_overlap{ext}', highlight[..., ::-1])
 
             except Exception as e:
                 print(e)
                 print('draw_preditions_boxes failed')
+    if overlap_report:
+        write_overlap_report(all_tooth_rows, all_pair_rows, mask_save_dir, processed_count)
     # model = build_model(args)
     # checkpoint = torch.load(args.pretrain_weights, map_location='cpu', weights_only=False)
     # res = model.load_state_dict(checkpoint['model'], strict=False)
@@ -544,6 +775,20 @@ if __name__ == '__main__':
         type=int,
         default=None,
         help='polygon 모드 선 두께(px). 미지정 시 원본 너비 1000px당 1px (2041px -> 2px).',
+    )
+    parser.add_argument(
+        '--overlap-report', '--overlap_report',
+        dest='overlap_report',
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help='치아별 중첩 영역 산출 후 save-dir 에 CSV/markdown 리포트 저장 (polygon 모드 기본 활성).',
+    )
+    parser.add_argument(
+        '--max-images', '--max_images',
+        dest='max_images',
+        type=int,
+        default=None,
+        help='처리할 최대 이미지 수 (디버깅용).',
     )
     cli_args = parser.parse_args()
     main(

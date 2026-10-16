@@ -13,6 +13,7 @@ import roboflow
 from rfdetr import RFDETRBase, RFDETRNano, RFDETRSmall
 import torch
 import os
+import json
 
 def download_dataset(rf_project: roboflow.Project, dataset_version: int):
     versions = rf_project.versions()
@@ -119,6 +120,19 @@ def get_my_arg_parse():
                         # default=True,
                         default='outputs/pretrained/segmentation/xray_teeth_seg/bounding_bbox_regularization/checkpoint.pth',
                         help='Run save results after training')
+    parser.add_argument('--xray_crop_mode', type=str, nargs='+', default=None, choices=['periapical', 'teeth_roi'],
+                        help='학습 샘플 crop (기본 비활성, train split만). 여러 개 지정 가능 (예: periapical teeth_roi). '
+                             'periapical: 치근단 방사선 모사 (이웃 치아 3~5개, 상악/하악/상하악, 사선/둥근 모서리). '
+                             'teeth_roi: two-pass 2차 입력 (전체 치아 영역만 crop). 상세: rfdetr/datasets/xray_crop_aug.py')
+    parser.add_argument('--xray_crop_prob', type=float, nargs='+', default=[1.0],
+                        help='mode별 선택 확률. 값 1개면 모든 mode에 같은 값, 여러 개면 --xray_crop_mode 순서대로. '
+                             '샘플마다 mode 하나를 확률대로 고르고 나머지(1-합)는 전체 영상. 합이 1을 넘으면 비율로 정규화 '
+                             '(예: periapical teeth_roi + 0.3 0.3 -> PA 30%%, ROI 30%%, 전체 영상 40%%)')
+    parser.add_argument('--xray_crop_cfg', type=str, default=None,
+                        help='crop 세부 파라미터 JSON (xray_crop_aug.DEFAULT_PERIAPICAL / DEFAULT_TEETH_ROI 덮어쓰기). '
+                             'mode별 지정: \'{"periapical": {"num_teeth": [3, 4]}, "teeth_roi": {"margin": [0.05, 0.1]}}\'')
+    parser.add_argument('--save_crop_samples', type=int, default=0,
+                        help='N>0: --xray_crop_mode의 mode별로 학습 샘플 N장을 outputs/xray_crop_samples/{mode}/ 에 저장하고 종료')
     parser.add_argument('--build_tufts', action='store_true',
                         help='Tufts(kaggle_2222) teeth_polygon.pkl -> ann/*.json 변환(기존 ann 자동 백업) + 변환 점검 후 종료')
     parser.add_argument('--build_json', action='store_true',
@@ -208,7 +222,15 @@ def train_from_xray_teeth_dir():
         build_xray_coco_json(dataset_dir, json_base_dirs, annot_file_v2, num_classes=args.num_classes)
         verify_xray_coco_json(annot_file_v2, base_dir=json_base_dirs[0],
                               vis_dir='outputs/xray_coco_json_vis', num_vis=20)
-    if args.build_tufts or args.build_json:
+    xray_crop_cfg = json.loads(args.xray_crop_cfg) if args.xray_crop_cfg else None
+    if args.save_crop_samples > 0:
+        assert args.xray_crop_mode, '--save_crop_samples needs --xray_crop_mode periapical|teeth_roi'
+        from rfdetr.datasets.xray_crop_aug import save_crop_samples, split_crop_cfg
+        mode_cfgs = split_crop_cfg(xray_crop_cfg, args.xray_crop_mode)
+        for mode in args.xray_crop_mode:  # mode별로 따로 저장 (확률과 무관하게 해당 mode 100%)
+            save_crop_samples(dataset_dir, coco_directories, mode, 'outputs/xray_crop_samples',
+                              num=args.save_crop_samples, num_classes=args.num_classes, cfg=mode_cfgs[mode])
+    if args.build_tufts or args.build_json or args.save_crop_samples > 0:
         return
     if os.path.exists(annot_file_v2):
         annot_file = annot_file_v2
@@ -320,6 +342,10 @@ def train_from_xray_teeth_dir():
         segmentation_head=args.segmentation_head,
         eval_save=args.eval_save,
         eval=args.eval,
+        # crop 학습 (기본 None: 비활성). val/eval은 기존처럼 전체 영상
+        xray_crop_mode=args.xray_crop_mode,
+        xray_crop_prob=args.xray_crop_prob,
+        xray_crop_cfg=xray_crop_cfg,
         # **args.__dict__
         
         # dataset -config

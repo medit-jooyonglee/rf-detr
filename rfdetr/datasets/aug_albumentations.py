@@ -378,10 +378,14 @@ class MaskawareImageAug(DualTransform):
 
     def apply_to_bboxes(self, bboxes, **params):
         return bboxes
-        
+
+    def apply_to_mask(self, mask, **params):
+        # 밝기 아티팩트는 영상에만 적용. mask(예: PA crop 모서리 유효영역)는 그대로 둔다
+        return mask
+
     def apply_to_keypoints(self, keypoints, **params):
         polygons_indices = params['polygons_indices']
-        
+
         return keypoints
             
 

@@ -435,6 +435,7 @@ def draw_preditions_boxes(
     input_content_box=None,
     drawing_mode='mask',
     polygon_thickness=None,
+    instance_results=None,
     **kwargs
 ):
     """Draw predictions, optionally restoring the rendered output to its original size.
@@ -456,6 +457,9 @@ def draw_preditions_boxes(
             The returned label map (``mask_images``) is identical in both modes.
         polygon_thickness: Contour thickness in pixels for ``'polygon'`` mode.
             ``None`` scales with the render width (1px per 1000px, e.g. 2px at 2041px).
+        instance_results: Optional list. When given, one dict per image is appended
+            with ``fdi`` (N,), ``scores`` (N,), ``boxes`` (N, 4) and ``masks``
+            (N, H, W) bool instance masks at render size, for per-tooth analysis.
     """
     if drawing_mode not in ('mask', 'polygon'):
         raise ValueError(f"drawing_mode must be 'mask' or 'polygon', got {drawing_mode!r}")
@@ -734,11 +738,27 @@ def draw_preditions_boxes(
 
             restore_label_image = restore_to_render(label_image)
             mask_images.append(restore_label_image)
+            restored_instance_masks = None
+            if drawing_mode == 'polygon' or instance_results is not None:
+                restored_instance_masks = [
+                    restore_to_render(np.ascontiguousarray(instance_mask, dtype=np.uint8))
+                    for instance_mask in posit_masks
+                ]
+            if instance_results is not None:
+                instance_results.append({
+                    'fdi': np.asarray(posit_labels),
+                    'scores': np.asarray(pred_scores[i]),
+                    'boxes': boxes_xy,
+                    'masks': (
+                        np.stack(restored_instance_masks).astype(bool)
+                        if len(restored_instance_masks) > 0
+                        else np.zeros((0, render_height, render_width), dtype=bool)
+                    ),
+                })
             if drawing_mode == 'polygon':
                 # 치아별 외곽선을 따로 그려서 인접 치아 사이 중첩 영역이 보이게 한다 (채우지 않음)
                 thickness = polygon_thickness or max(1, int(round(render_width / 1000)))
-                for instance_mask, instance_label in zip(posit_masks, posit_labels):
-                    instance_mask = restore_to_render(np.ascontiguousarray(instance_mask, dtype=np.uint8))
+                for instance_mask, instance_label in zip(restored_instance_masks, posit_labels):
                     contours, _ = cv2.findContours(
                         instance_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
                     )
