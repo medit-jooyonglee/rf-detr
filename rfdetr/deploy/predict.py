@@ -774,7 +774,7 @@ if __name__ == '__main__':
         dest='polygon_thickness',
         type=int,
         default=None,
-        help='polygon 모드 선 두께(px). 미지정 시 원본 너비 1000px당 1px (2041px -> 2px).',
+        help='polygon 모드 선 두께(px). 미지정 시 기존 자동 두께의 2배 (최소 2px, 2041px -> 4px).',
     )
     parser.add_argument(
         '--overlap-report', '--overlap_report',

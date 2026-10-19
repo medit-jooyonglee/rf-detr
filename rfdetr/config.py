@@ -132,6 +132,8 @@ class RFDETRSegPreviewConfig(RFDETRBaseConfig):
     num_classes: int = 90
 
 class TrainConfig(BaseModel):
+    eval_xray_crop: bool = False
+    eval_xray_crop_seed: int = 42
     lr: float = 1e-4
     lr_encoder: float = 1.5e-4
     batch_size: int = 4

@@ -104,10 +104,11 @@ def get_my_arg_parse():
     
     parser.add_argument("--coco_dir", type=str, default='/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle/Teeth Segmentation JSON/d2/')
     parser.add_argument("--num_classes", type=int, required=False, default=32)
+    parser.add_argument("--device", type=str, default='cuda:0', help='Device to use for training (e.g., "cuda:0" or "cpu")')
     # parser.add_argument("--project_name", type=str, required=False, default=None)
     parser.add_argument("--annot_file", type=str, required=False, default='../../xray_coco_33_seg.json')
     # parser.add_argument("--annot_file", type=str, required=False, default='../../xray_coco_33_seg.json')
-    parser.add_argument('--eval', action='store_true', help='Run evaluation after training')
+    parser.add_argument('--eval', action='store_true', help='Run evaluation only (skip training)')
     parser.add_argument('--eval_save', action='store_true',
                         # default=True,
                         help='Run save results after training')
@@ -120,8 +121,11 @@ def get_my_arg_parse():
                         # default=True,
                         default='outputs/pretrained/segmentation/xray_teeth_seg/bounding_bbox_regularization/checkpoint.pth',
                         help='Run save results after training')
+    parser.add_argument('--output_dir', type=str,
+                        default='output/xray_teeth33_dinov2tiny_small_seg_crop_regularization',
+                        help='학습 결과(checkpoint, log) 저장 경로')
     parser.add_argument('--xray_crop_mode', type=str, nargs='+', default=None, choices=['periapical', 'teeth_roi'],
-                        help='학습 샘플 crop (기본 비활성, train split만). 여러 개 지정 가능 (예: periapical teeth_roi). '
+                        help='학습 샘플 crop (검증에도 적용하려면 --eval_xray_crop). 여러 개 지정 가능 (예: periapical teeth_roi). '
                              'periapical: 치근단 방사선 모사 (이웃 치아 3~5개, 상악/하악/상하악, 사선/둥근 모서리). '
                              'teeth_roi: two-pass 2차 입력 (전체 치아 영역만 crop). 상세: rfdetr/datasets/xray_crop_aug.py')
     parser.add_argument('--xray_crop_prob', type=float, nargs='+', default=[1.0],
@@ -131,6 +135,11 @@ def get_my_arg_parse():
     parser.add_argument('--xray_crop_cfg', type=str, default=None,
                         help='crop 세부 파라미터 JSON (xray_crop_aug.DEFAULT_PERIAPICAL / DEFAULT_TEETH_ROI 덮어쓰기). '
                              'mode별 지정: \'{"periapical": {"num_teeth": [3, 4]}, "teeth_roi": {"margin": [0.05, 0.1]}}\'')
+    parser.add_argument('--eval_xray_crop', action='store_true',
+                        help='val/valid/test에도 xray crop 적용. 회전/색상 증강은 끄고 crop된 GT로 평가. '
+                             '--eval --eval_save와 함께 사용하면 crop 영상 예측 저장')
+    parser.add_argument('--eval_xray_crop_seed', type=int, default=42,
+                        help='검증 crop 시드 (이미지별 고정, 기본 42)')
     parser.add_argument('--save_crop_samples', type=int, default=0,
                         help='N>0: --xray_crop_mode의 mode별로 학습 샘플 N장을 outputs/xray_crop_samples/{mode}/ 에 저장하고 종료')
     parser.add_argument('--build_tufts', action='store_true',
@@ -144,6 +153,8 @@ def get_my_arg_parse():
     #                     default='',
     #                 help='Run save results after training')
     args = parser.parse_args()
+    if args.eval_xray_crop and not args.xray_crop_mode:
+        parser.error('--eval_xray_crop requires --xray_crop_mode')
     return args
 
 
@@ -201,6 +212,8 @@ def train_from_xray_teeth_dir():
         json_base_dirs = ['/data1/jooyonglee/reverse_tomo/xray_panoramic']
     args = get_my_arg_parse()
 
+    if torch.device(args.device).type == 'cuda':
+        torch.cuda.set_device(torch.device(args.device))
     # 평가 GT json: 기존 json은 images[].width/height, area가 리사이즈 기준이라 segm 평가가 0이 된다.
     # 원본 좌표로 재빌드한 *_v2.json을 쓴다. (docs/troubleshoots/xray_coco_json_segm_eval.md)
     annot_file_v2 = annot_file.replace('.json', '_v2.json')
@@ -308,7 +321,7 @@ def train_from_xray_teeth_dir():
         dataset_dir=dataset_dir,
         coco_directories=coco_directories,
         epochs=250,
-        device="cuda" if device_supports_cuda else "cpu",
+        device=args.device,
         dataset_file='xray_teeth',
         # coco_path=teeth_dir,
         batch_size=args.batch_size,
@@ -331,7 +344,7 @@ def train_from_xray_teeth_dir():
         segmentation_crop_box_scale=1.15,
         coarse_hint_dropout=0.30,
         checkpoint_interval = 30,
-        output_dir='output/xray_teeth33_dinov2tiny_small_seg_crop_regularization',
+        output_dir=args.output_dir,
         # annot_file='../../xray_coco_33.json',
         # annot_file='../../xray_coco_33.json',
         annot_file=annot_file,
@@ -342,10 +355,12 @@ def train_from_xray_teeth_dir():
         segmentation_head=args.segmentation_head,
         eval_save=args.eval_save,
         eval=args.eval,
-        # crop 학습 (기본 None: 비활성). val/eval은 기존처럼 전체 영상
+        # 기본은 학습에만 crop. eval_xray_crop으로 검증에도 명시적으로 활성화.
         xray_crop_mode=args.xray_crop_mode,
         xray_crop_prob=args.xray_crop_prob,
         xray_crop_cfg=xray_crop_cfg,
+        eval_xray_crop=args.eval_xray_crop,
+        eval_xray_crop_seed=args.eval_xray_crop_seed,
         # **args.__dict__
         
         # dataset -config
@@ -402,7 +417,7 @@ if __name__ == "__main__":
     # coco_dir = '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle/Teeth Segmentation JSON/d2/'
     # 'E:\dataset\reverse_tomosynthesis\kaggle_xrays\xray_teeth_seg_kaggle\Teeth Segmentation JSON\d2'
     # coco_dir = '/data1/jooyonglee/teeth_segmentation3d/render_set/teeth_seg_3d/'
-    torch.cuda.set_device(torch.device('cuda:0'))
+
     # train_from_teeth_dir(coco_dir)
     train_from_xray_teeth_dir()
 

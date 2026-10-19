@@ -283,10 +283,18 @@ def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=N
             outputs = model(samples)
             
             if getattr(args, 'eval_save', False):
+                crop_preview = getattr(args, 'eval_xray_crop', False)
+                crop_modes = getattr(args, 'xray_crop_mode', None) or []
+                if isinstance(crop_modes, str):
+                    crop_modes = [crop_modes]
                 draw_preditions_boxes(
                     samples,
                     outputs,
                     save=True,
+                    save_dir=os.path.join(args.output_dir, 'eval', '_'.join(crop_modes))
+                    if crop_preview else 'results',
+                    with_source_concat=crop_preview,
+                    drawing_mode='polygon' if crop_preview else 'mask',
                     segmentation_mode=getattr(
                         args, 'segmentation_mode', 'full_image'
                     ),
@@ -456,13 +464,45 @@ def draw_preditions_boxes(
             label color, so overlaps between neighboring teeth stay visible.
             The returned label map (``mask_images``) is identical in both modes.
         polygon_thickness: Contour thickness in pixels for ``'polygon'`` mode.
-            ``None`` scales with the render width (1px per 1000px, e.g. 2px at 2041px).
+            ``None`` scales with the render width (twice the rounded 1px per 1000px baseline).
         instance_results: Optional list. When given, one dict per image is appended
             with ``fdi`` (N,), ``scores`` (N,), ``boxes`` (N, 4) and ``masks``
             (N, H, W) bool instance masks at render size, for per-tooth analysis.
     """
     if drawing_mode not in ('mask', 'polygon'):
         raise ValueError(f"drawing_mode must be 'mask' or 'polygon', got {drawing_mode!r}")
+    padding_mask = getattr(new_samples, 'mask', None)
+    if padding_mask is not None and padding_mask.any():
+        # Boxes are normalized to each image, not to the padded batch canvas.
+        rendered, label_maps = [], []
+        for index, valid in enumerate(~padding_mask):
+            valid_h = int(valid.any(dim=1).sum().item())
+            valid_w = int(valid.any(dim=0).sum().item())
+            single_outputs = {
+                key: outputs[key][index:index + 1]
+                for key in ('pred_boxes', 'pred_logits', 'pred_masks') if key in outputs
+            }
+            if 'pred_masks' in single_outputs and segmentation_mode != 'crop_and_resize':
+                single_outputs['pred_masks'] = F.interpolate(
+                    single_outputs['pred_masks'], size=new_samples.tensors.shape[-2:],
+                    mode='bilinear', align_corners=False,
+                )[..., :valid_h, :valid_w]
+            images, masks = draw_preditions_boxes(
+                new_samples.tensors[index:index + 1, :, :valid_h, :valid_w],
+                single_outputs, save=save, save_dir=save_dir,
+                nms_refinement=nms_refinement, fname=fname, origin_size=origin_size,
+                segmentation_mode=segmentation_mode,
+                mask_probability_threshold=mask_probability_threshold,
+                segmentation_crop_box_scale=segmentation_crop_box_scale,
+                with_source_concat=with_source_concat,
+                paste_masks_at_original_size=paste_masks_at_original_size,
+                input_content_box=input_content_box, drawing_mode=drawing_mode,
+                polygon_thickness=polygon_thickness, instance_results=instance_results,
+                **kwargs,
+            )
+            rendered.extend(images)
+            label_maps.extend(masks)
+        return rendered, label_maps
     from trainer import torch_utils
     from rfdetr.datasets.teeth import draw_bboxes
     from trainer import utils_numpy, image_utils, time_strftime, vtk_utils
@@ -757,7 +797,7 @@ def draw_preditions_boxes(
                 })
             if drawing_mode == 'polygon':
                 # 치아별 외곽선을 따로 그려서 인접 치아 사이 중첩 영역이 보이게 한다 (채우지 않음)
-                thickness = polygon_thickness or max(1, int(round(render_width / 1000)))
+                thickness = polygon_thickness or 2 * max(1, int(round(render_width / 1000)))
                 for instance_mask, instance_label in zip(restored_instance_masks, posit_labels):
                     contours, _ = cv2.findContours(
                         instance_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
@@ -775,11 +815,11 @@ def draw_preditions_boxes(
 
         if save:
             # save_dir = 
-            save_dir = os.path.join(save_dir, time.strftime('%Y%m%d'))
+            dated_save_dir = os.path.join(save_dir, time.strftime('%Y%m%d'))
             if fname:
-                save_name = os.path.join(save_dir, fname)
+                save_name = os.path.join(dated_save_dir, fname)
             else:
-                save_name = f'{save_dir}/bounding_draw_{time_strftime()}.png'            
+                save_name = f'{dated_save_dir}/bounding_draw_{time_strftime()}.png'
             os.makedirs(os.path.dirname(save_name), exist_ok=True)
             
             # cv2.imwrite(save_name, image.astype(np.uint8)[..., ::-1])

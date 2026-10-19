@@ -180,9 +180,13 @@ class LWDETR(nn.Module):
                 image_boxes[None],
                 self.segmentation_crop_size,
             )[0]
+            # Coarse masks cover the padded batch; ROI boxes refer to the valid image.
             probability_crops = crop_instance_masks(
                 image_coarse_masks.detach().sigmoid(),
-                image_boxes,
+                image_boxes * image_boxes.new_tensor([
+                    image.shape[-1] / images.shape[-1], image.shape[-2] / images.shape[-2],
+                    image.shape[-1] / images.shape[-1], image.shape[-2] / images.shape[-2],
+                ]),
                 self.segmentation_crop_size,
             )[:, None]
             probability_crops = self._prepare_coarse_hint(probability_crops)
@@ -230,9 +234,13 @@ class LWDETR(nn.Module):
                 crop_boxes[None],
                 self.segmentation_crop_size,
             )[0]
+            # Sample the same physical region as image_crops on the padded coarse map.
             probability_crops = crop_instance_masks(
                 selected_coarse_masks.detach().sigmoid(),
-                crop_boxes,
+                crop_boxes * crop_boxes.new_tensor([
+                    valid_w / images.shape[-1], valid_h / images.shape[-2],
+                    valid_w / images.shape[-1], valid_h / images.shape[-2],
+                ]),
                 self.segmentation_crop_size,
             )[:, None]
             probability_crops = self._prepare_coarse_hint(probability_crops)
@@ -641,8 +649,9 @@ class SetCriterion(nn.Module):
             target_crop_boxes = expand_normalized_boxes(
                 target['boxes'], self.segmentation_crop_box_scale
             )
+            # collate_fn pads masks, but target boxes stay normalized to target['size'].
             target_crops = crop_instance_masks(
-                target['masks'],
+                target['masks'][..., :int(target['size'][0]), :int(target['size'][1])],
                 target_crop_boxes,
                 self.segmentation_crop_size,
             )

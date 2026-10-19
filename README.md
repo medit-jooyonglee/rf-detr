@@ -377,3 +377,36 @@ python -m rfdetr.cli.main --build_json    # 평가 json(Kaggle + Tufts) 빌드 +
 - **유치 번호 중복이 남아 있다.** Tufts의 유치를 영구치 번호로 매핑(`T→29` 등)하기 때문에 혼합치열 이미지에서 같은 번호가 두 개 생긴다(100장 표본에서 40쌍). Kaggle 원본에도 같은 번호 중복 라벨이 일부 있다. GT 자기 자신 평가에서 AP는 1.0이지만, AR@maxDets=1이 약 0.977로 나오는 건 이 중복 때문이다(이미지·치아번호당 예측 1개만 인정).
 - **③ 자체 데이터는 평가에 들어가지 않는다.** `xraypanoramic.py::build()`가 train일 때만 `coco_directories`를 넘긴다. ③도 평가하려면 train/val split을 추가해야 한다(미구현).
 - `rfdetr/datasets/xray_overlap_stats.py`의 `own` 시각화 파일명에는 환자 이름이 들어간다. 외부로 공유할 때 주의한다.
+
+
+
+
+##  xray파노라믹 pa / bw 이미지로 학습하기
+~~~
+
+python -m rfdetr.cli.main \
+  --pretrain_weights outputs/fine_tune_pa_teeth_roi_padding_fixed/checkpoint_best_ema.pth \
+  --xray_crop_mode periapical teeth_roi \
+  --xray_crop_prob 0.4 0.4 \
+  --batch_size 4 \
+  --device cuda:5 \
+  --output_dir outputs/fine_tune_pa_teeth_roi_padding_fixed
+~~~
+
+
+##  데이터셋으로 crop 모드로 evaluatation 별도 수행
+
+
+~~~
+
+python -m rfdetr.cli.main \
+  --pretrain_weights outputs/fine_tune_pa_teeth_roi_padding_fixed/checkpoint_best_regular.pth \
+  --xray_crop_mode periapical teeth_roi \
+  --xray_crop_prob 0.5 0.5 \
+  --batch_size 1 \
+  --device cuda:5 \
+  --eval \
+  --eval_save \
+  --eval_xray_crop
+  
+~~~

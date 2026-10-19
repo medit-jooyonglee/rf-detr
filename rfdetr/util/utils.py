@@ -89,17 +89,18 @@ class BestMetricHolder():
 
     def update(self, new_res, epoch, is_ema=False):
         """
-        return if the results is the best.
+        Return whether this model improved its own best result.
+
+        Track the overall best separately so regular and EMA checkpoints are
+        saved whenever their respective best improves.
         """
         if not self.use_ema:
             return self.best_all.update(new_res, epoch)
         else:
-            if is_ema:
-                self.best_ema.update(new_res, epoch)
-                return self.best_all.update(new_res, epoch)
-            else:
-                self.best_regular.update(new_res, epoch)
-                return self.best_all.update(new_res, epoch)
+            tracker = self.best_ema if is_ema else self.best_regular
+            improved = tracker.update(new_res, epoch)
+            self.best_all.update(new_res, epoch)
+            return improved
 
     def summary(self):
         if not self.use_ema:
