@@ -676,8 +676,16 @@ def inference_libtorch_model_main():
         
 
 
-def predict_wrapper(img, model=None,
-                    drawing_mode='mask'):
+def predict_wrapper(img, model=None, drawing_mode='mask',
+                    return_instance_results=False):
+    """Run one image while preserving the legacy two-value return by default.
+
+    When ``return_instance_results`` is true, a third value is returned with
+    the independent per-tooth masks produced before the single-winner FDI
+    label image is composed.  This is the overlap-preserving input used by
+    reverse registration; callers that only need ``(drawing, mask)`` are
+    unaffected.
+    """
     if model is None:
         model = init_and_get_model(export=False, use_ema=True)
     if img.ndim ==3:
@@ -716,19 +724,22 @@ def predict_wrapper(img, model=None,
         if 'pred_masks' in outputs:
             print(outputs['pred_masks'].shape)
     
+        instance_results = [] if return_instance_results else None
         # try:
-            color_image, mask_iamge = draw_preditions_boxes(
-                img_tensor, outputs, save=False, origin_size=img.shape[:2],
-                                    segmentation_mode='crop_and_resize',
-                mask_probability_threshold=MASK_PROBABILITY_THRESHOLD,
-                segmentation_crop_box_scale=1.15,
-                with_source_concat=False,
-                paste_masks_at_original_size=True,
-                input_content_box=input_content_box,
-                drawing_mode=drawing_mode,
-                
-            )
+        color_image, mask_iamge = draw_preditions_boxes(
+            img_tensor, outputs, save=False, origin_size=img.shape[:2],
+            segmentation_mode='crop_and_resize',
+            mask_probability_threshold=MASK_PROBABILITY_THRESHOLD,
+            segmentation_crop_box_scale=1.15,
+            with_source_concat=False,
+            paste_masks_at_original_size=True,
+            input_content_box=input_content_box,
+            drawing_mode=drawing_mode,
+            instance_results=instance_results,
+        )
             
+    if return_instance_results:
+        return color_image[0], mask_iamge[0], instance_results[0]
     return color_image[0], mask_iamge[0]
 
 
