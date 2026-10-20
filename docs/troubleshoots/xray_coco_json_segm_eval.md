@@ -100,6 +100,41 @@ json을 만드는 `coco_json_export`가 **학습용 resize 파이프라인(`pars
 `xray_coco_33_seg.json`이 학습에서 쓰이는 곳은 `XrayPnoaramicInstanceCoco`의 `file_name` → `image_id` 매핑뿐이다.
 따라서 json을 원본 좌표로 다시 만들어도 학습 결과에는 영향이 없고, **기존 체크포인트도 그대로 사용할 수 있다.**
 
+### 3.6 데이터셋별 재빌드 필요 여부
+
+| 데이터 | 평가 json(`_v2`)에 포함 | 좌표 기준 | 재빌드 |
+|---|---|---|---|
+| ① Kaggle | 포함 | `--build_json`으로 원본 크기로 다시 만듦 | 필요 |
+| ② Tufts | 포함 | `--build_json`으로 원본 크기로 다시 만듦 | 필요 |
+| ③ 자체 데이터 (`cbct_ios_dcm_latest_0824`) | **제외** (train에만 사용) | 이미 원본 크기 | 불필요 |
+
+**③은 평가에 들어가지 않는다.** `xraypanoramic.py::build()`에서 `image_set == 'train'`일 때만 `coco_directories`를 넘기고, val/test에서는 `None`으로 버린다.
+③에는 split도 적용되지 않는다. `CocoDetection`이 `annotations.json`의 이미지 420장을 **전부 train으로** 읽는다.
+
+```
+train : ①② (0 ~ 0.85) + ③ 전체 420장
+val   : ①② (0.85 ~ 0.9)          ← --eval은 이것만 평가
+test  : ①② (0.9 ~ 1.0)
+```
+
+그래서 기존 json으로 `--eval`을 실행하면 segm이 **전부 0**으로 나온다. ③의 json에는 문제가 없지만, val에는 json이 깨진 ①②만 있기 때문이다.
+
+**③의 json이 원본 크기인 이유**
+- 변환 코드(labelme repo `examples/instance_segmentation/labelme2coco.py::convert_labelme_dirs_to_coco`)는 `width/height`를 실제 이미지 크기(`img.shape`)로 넣는다.
+- `segmentation`은 labelme의 원본 polygon이고, `area/bbox`는 원본 크기 마스크에서 계산한다.
+- resize 단계가 없어서, ①②처럼 원본 좌표와 리사이즈 좌표가 섞일 수 없다.
+
+**③ `annotations.json` 전수 검사 결과 (2026-10-12)**
+- 이미지 420장, annotation 11,359개. 대부분 2640×1256이다.
+- json의 width/height와 실제 이미지 크기가 다른 이미지: 0장
+- 이미지 밖으로 나간 polygon: 0개. area/bbox 면적 비율 중앙값: 0.647 (정상)
+- category는 1~32로, ①②와 같은 universal 번호 체계다. 숫자가 아닌 라벨은 없다.
+- image id는 0..N-1로 연속이다.
+
+**③을 다시 변환하거나 평가에 넣어야 하는 경우**
+- labelme에서 라벨을 추가하거나 수정했을 때: `convert_labelme_dirs_to_coco`를 새 출력 폴더로 다시 실행한다. 원본 크기 규칙은 그대로 유지된다.
+- ③도 평가하고 싶을 때: 지금은 ③ 전체가 train이라 그대로 넣으면 학습한 이미지로 평가하게 된다. ③에도 train/val split을 추가해야 한다(미구현).
+
 ---
 
 ## 4. 해결 시나리오 (추천): 평가 json 재빌드
@@ -228,6 +263,11 @@ assert all(m >= 0 for m in matched_idx), 'some images are not found in annotatio
 현재 코드는 리스트 인덱스를 그대로 image id로 쓴다. id가 0..N-1로 연속일 때만 맞는 방식이라, id 값을 직접 쓰도록 바꾼다.
 
 ### 4.3 json 빌드 (로컬 PC)
+
+> **구현 완료**: `python -m rfdetr.cli.main --build_json`
+> - 학습과 같은 `dataset_dir`(①②)로 `xray_coco_33_seg_v2.json`을 빌드하고 `verify_xray_coco_json`으로 검증한다.
+> - 평소 실행(학습/`--eval`)에서는 `_v2.json`이 있으면 그 파일을 쓴다.
+> - 전체 빌드(1598장)에서 GT 자기 자신 평가 결과는 bbox/segm 모두 AP 1.0이다. 처음 0.999로 나온 원인은 annotation id가 0부터 시작한 것(pycocotools는 매칭된 GT id 0을 "매칭 안 됨"으로 해석)과, 면적 0인 일직선 polygon 1개(Kaggle 367.jpg 15번)였다. 둘 다 export에서 수정했다(id는 1부터, 면적 0 polygon 제외).
 
 `test_build_coco_json`을 ①② 기준으로 수정한다.
 
@@ -374,3 +414,13 @@ for i in d['images'][:3]:
           Image.open(os.path.join(base, i['file_name'].replace('\\', '/'))).size)
 # → xray_teeth_seg_kaggle/.../img/1.jpg (384, 704) (2041, 1024)
 ```
+
+
+----
+
+
+
+데이터	평가 json(_v2)에 포함	좌표 기준	재빌드
+① Kaggle	포함	--build_json으로 원본 크기로 다시 만듦	필요 (이번 수정)
+② Tufts	포함	--build_json으로 원본 크기로 다시 만듦	필요 (이번 수정)
+③ 자체 데이터 (cbct_ios_dcm_latest_0824)	제외 (train에만 사용)	이미 원본 크기	불필요

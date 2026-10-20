@@ -444,6 +444,7 @@ def draw_preditions_boxes(
     drawing_mode='mask',
     polygon_thickness=None,
     instance_results=None,
+    fdi_refinement=True,
     **kwargs
 ):
     """Draw predictions, optionally restoring the rendered output to its original size.
@@ -468,6 +469,10 @@ def draw_preditions_boxes(
         instance_results: Optional list. When given, one dict per image is appended
             with ``fdi`` (N,), ``scores`` (N,), ``boxes`` (N, 4) and ``masks``
             (N, H, W) bool instance masks at render size, for per-tooth analysis.
+        fdi_refinement: After NMS, sort each arch (upper/lower) by box x-center and
+            reassign labels so they increase monotonically, maximizing the summed
+            log class probability. Removes duplicated/outlier FDI numbers; labels
+            already in a valid order are left untouched. Requires ``nms_refinement``.
     """
     if drawing_mode not in ('mask', 'polygon'):
         raise ValueError(f"drawing_mode must be 'mask' or 'polygon', got {drawing_mode!r}")
@@ -498,6 +503,7 @@ def draw_preditions_boxes(
                 paste_masks_at_original_size=paste_masks_at_original_size,
                 input_content_box=input_content_box, drawing_mode=drawing_mode,
                 polygon_thickness=polygon_thickness, instance_results=instance_results,
+                fdi_refinement=fdi_refinement,
                 **kwargs,
             )
             rendered.extend(images)
@@ -597,10 +603,17 @@ def draw_preditions_boxes(
             keep_indices = np.where(posit)[0][keep_indices]
             selected_query_indices.append(keep_indices)
             print(f'batch {ib}: nms {posit.sum()}--->{len(keep_indices)}')
+            keep_labels = pred_label[ib][keep_indices]
+            keep_scores = pred_scores[ib][keep_indices]
+            if fdi_refinement and len(keep_indices) > 0:
+                from rfdetr.util.fdi_refinement import refine_fdi_labels
+                keep_probs = probs[ib][keep_indices]
+                keep_labels = refine_fdi_labels(keep_labels, keep_probs, boxes[ib][keep_indices])
+                keep_scores = keep_probs[np.arange(len(keep_indices)), keep_labels]
             nms_bboxes.append(boxes[ib][keep_indices])
             nms_mask_bboxes.append(mask_boxes[ib][keep_indices])
-            nms_labels.append(pred_label[ib][keep_indices])
-            nms_scores.append(pred_scores[ib][keep_indices])
+            nms_labels.append(keep_labels)
+            nms_scores.append(keep_scores)
 
         pred_label = nms_labels
         pred_scores = nms_scores
