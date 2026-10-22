@@ -4,6 +4,7 @@ import cv2
 import ast
 import random
 import argparse
+import shutil
 import subprocess
 import torch.nn as nn
 from pathlib import Path
@@ -305,12 +306,22 @@ def main(*,
          polygon_thickness=None,
          overlap_report=None,
          max_images=None,
+         convert=None,
+         polygon_epsilon=2.0,
          **kwargs):
     # FIXME: save_path
     from trainer import diskmanager, image_utils
     # save_dir = f'results/test/0828'
-    model = init_and_get_model(export=False, use_ema=use_ema)
+    if convert not in (None, 'labelme'):
+        raise ValueError(f"Unsupported conversion format: {convert!r}")
+    if polygon_epsilon < 0:
+        raise ValueError("polygon_epsilon must be non-negative")
+    if convert == 'labelme':
+        drawing_mode = 'polygon'
+        if overlap_report is None:
+            overlap_report = False
     assert drawing_mode in ['mask', 'polygon'], "Invalid drawing mode specified."
+    model = init_and_get_model(export=False, use_ema=use_ema)
     if overlap_report is None:
         overlap_report = drawing_mode == 'polygon'
     all_tooth_rows, all_pair_rows = [], []
@@ -358,7 +369,7 @@ def main(*,
                 print(outputs['pred_masks'].shape)
         
             try:
-                instance_results = [] if overlap_report else None
+                instance_results = [] if overlap_report or convert == 'labelme' else None
                 color_image, mask_iamge = draw_preditions_boxes(
                     img_tensor, outputs, save=False, origin_size=img.shape[:2],
                                         segmentation_mode='crop_and_resize',
@@ -376,11 +387,29 @@ def main(*,
                 assert len(mask_iamge) == 1, "Expected a single mask image."
                 savename = os.path.join(mask_save_dir, os.path.relpath(file, path))
                 os.makedirs(os.path.dirname(savename), exist_ok=True)
-                # cv2.imwrite(savename, mask_iamge[0].astype(np.uint8))
                 from trainer import image_utils
-                image_utils.cv2_imwrite(savename.replace('.jpg', '.png'), mask_iamge[0].astype(np.uint8))
-                image_utils.cv2_imwrite(savename, color_image[0].astype(np.uint8)[..., ::-1])  # Convert RGB to BGR for saving with OpenCV
-                print(f"Saved mask image to: {savename.replace('.jpg', '.png')}")
+                stem, ext = os.path.splitext(savename)
+                if convert == 'labelme':
+                    from rfdetr.util.detr2labelme import save_labelme_annotation
+
+                    source_path = Path(file).resolve()
+                    output_image_path = Path(savename).resolve()
+                    if source_path != output_image_path:
+                        shutil.copy2(source_path, output_image_path)
+                    labelme_path = save_labelme_annotation(
+                        f'{stem}.json',
+                        savename,
+                        instance_results[0],
+                        image_height=img.shape[0],
+                        image_width=img.shape[1],
+                        polygon_epsilon=polygon_epsilon,
+                    )
+                    print(f"Saved Labelme annotation to: {labelme_path}")
+                else:
+                    mask_path = f'{stem}.png'
+                    image_utils.cv2_imwrite(mask_path, mask_iamge[0].astype(np.uint8))
+                    image_utils.cv2_imwrite(savename, color_image[0].astype(np.uint8)[..., ::-1])  # Convert RGB to BGR for saving with OpenCV
+                    print(f"Saved mask image to: {mask_path}")
                 processed_count += 1
 
                 if overlap_report:
@@ -800,6 +829,27 @@ if __name__ == '__main__':
         type=int,
         default=None,
         help='처리할 최대 이미지 수 (디버깅용).',
+    )
+    parser.add_argument(
+        '--convert',
+        type=str,
+        choices=['labelme'],
+        default=None,
+        help=(
+            'Save predictions in the selected annotation format. '
+            'labelme writes only the original image and polygon JSON together, '
+            'and automatically uses --drawing-mode polygon.'
+        ),
+    )
+    parser.add_argument(
+        '--polygon-epsilon', '--polygon_epsilon',
+        dest='polygon_epsilon',
+        type=float,
+        default=2.0,
+        help=(
+            'RDP polygon simplification error in pixels for Labelme output. '
+            '0 disables simplification (default: 2.0).'
+        ),
     )
     cli_args = parser.parse_args()
     main(
