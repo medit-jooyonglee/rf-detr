@@ -153,5 +153,6 @@ image ─► backbone/decoder ─► boxes, query feature
 ## 관련 문서
 
 - `docs/xray_dataset_conversion.md`: 학습 라벨(`ann/*.json`) 포맷과 데이터셋별 변환 과정
+- `docs/xray_periapical_eval.md`: PA crop 학습 방식, 전체 영상 대비 PA-only 평가 결과
 - `README.md` 하단: 데이터셋 목록, 평가 json 빌드, PA/ROI 학습 명령
 - `docs/troubleshoots/xray_coco_json_segm_eval.md`: segm 평가 0 문제 원인 분석
