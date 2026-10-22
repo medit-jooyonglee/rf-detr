@@ -1,6 +1,6 @@
 import numpy as np
 
-from rfdetr.deploy.predict import resize_image
+from rfdetr.deploy.predict import is_inference_filename_excluded, resize_image
 
 
 def test_resize_image_uses_exact_export_size():
@@ -21,3 +21,9 @@ def test_resize_image_rejects_invalid_export_size():
         assert "positive" in str(error)
     else:
         raise AssertionError("Expected invalid resize_hw to raise ValueError")
+
+
+def test_peri_filename_is_excluded_from_inference():
+    assert is_inference_filename_excluded(r"images\patient_PERI_01.jpg")
+    assert is_inference_filename_excluded(r"images\periapical.jpeg")
+    assert not is_inference_filename_excluded(r"peri_folder\patient_pano_01.jpg")

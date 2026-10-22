@@ -97,6 +97,7 @@ def instance_result_to_labelme_shapes(
                     "mask": None,
                 }
             )
+    shapes.sort(key=lambda shape: (int(shape["label"]), int(shape["group_id"])))
     return shapes
 
 

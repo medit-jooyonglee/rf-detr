@@ -32,8 +32,8 @@ def test_build_labelme_annotation_uses_polygon_shapes_and_instance_groups():
     assert annotation["imageData"] is None
     assert len(annotation["shapes"]) == 3
     assert {shape["shape_type"] for shape in annotation["shapes"]} == {"polygon"}
-    assert [shape["label"] for shape in annotation["shapes"]] == ["8", "8", "7"]
-    assert [shape["group_id"] for shape in annotation["shapes"]] == [0, 0, 1]
+    assert [shape["label"] for shape in annotation["shapes"]] == ["7", "8", "8"]
+    assert [shape["group_id"] for shape in annotation["shapes"]] == [1, 0, 0]
     assert all(len(shape["points"]) >= 3 for shape in annotation["shapes"])
 
 
@@ -48,7 +48,8 @@ def test_save_labelme_annotation_writes_loadable_json(tmp_path):
     with saved_path.open(encoding="utf-8") as file:
         annotation = json.load(file)
     assert annotation["imagePath"] == "pano.jpg"
-    assert annotation["shapes"][0]["description"] == "confidence=0.900000"
+    assert annotation["shapes"][0]["label"] == "7"
+    assert annotation["shapes"][0]["description"] == "confidence=0.800000"
 
 
 def test_build_labelme_annotation_rejects_dimension_mismatch():
@@ -81,3 +82,12 @@ def test_rdp_simplification_reduces_polygon_vertices():
 def test_fdi_to_universal_label_covers_all_quadrants():
     assert [fdi_to_universal_label(fdi) for fdi in (18, 11, 21, 28)] == [1, 8, 9, 16]
     assert [fdi_to_universal_label(fdi) for fdi in (38, 31, 41, 48)] == [17, 24, 25, 32]
+
+
+def test_shapes_are_saved_in_universal_number_order():
+    result = _sample_result()
+    result["fdi"] = np.array([41, 18])
+
+    shapes = instance_result_to_labelme_shapes(result)
+
+    assert [int(shape["label"]) for shape in shapes] == [1, 25, 25]

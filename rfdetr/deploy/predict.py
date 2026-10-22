@@ -40,6 +40,16 @@ from rfdetr.engine import draw_preditions_boxes
 g_rfdetr_model = None
 MASK_PROBABILITY_THRESHOLD = 0.5
 EXPORT_FIX_SIZE = (384, 704)
+TEMP_EXCLUDED_FILENAME_KEYWORDS = ('peri',)
+
+
+def is_inference_filename_excluded(file_path):
+    """Temporary filename filter used by the batch prediction command."""
+    filename = os.path.basename(os.fspath(file_path)).casefold()
+    return any(
+        keyword.casefold() in filename
+        for keyword in TEMP_EXCLUDED_FILENAME_KEYWORDS
+    )
 
 def get_target_image_size(image_shape, rererence_width:int = 640):
     ih, iw = image_shape[:2]
@@ -345,6 +355,10 @@ def main(*,
     
     mask_save_dir = save_dir # 'temp/resultsxray'
     found = diskmanager.deep_search_files(path, exts=['.jpg', '.jpeg', 'JPG', 'JPEG'])
+    excluded = [file for file in found if is_inference_filename_excluded(file)]
+    found = [file for file in found if not is_inference_filename_excluded(file)]
+    for file in excluded:
+        print(f'Skipping excluded filename: {file}')
     
     print('emtpy images')
     # found = glob.glob(f'{path}/*.jpg')
