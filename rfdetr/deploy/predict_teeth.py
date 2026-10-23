@@ -893,6 +893,17 @@ nohup python rfdetr/cli/main.py \
   --eval --eval_save \
   --output_dir outputs/natural_teeth_roi  > logs/natural_teeth_roi.log 2>&1 &
 
+
+1024x1024 어깨라인 사진 기준으로 구강쪽 이미지는 
+
+아래 크기는
+(heightxwidth)
+입벌리떄 200x330
+
+가슴주변부 상반신샷 
+105x240x
+
+
 """
 
 if __name__ == '__main__':
