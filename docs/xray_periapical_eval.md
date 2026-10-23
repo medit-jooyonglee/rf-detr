@@ -145,6 +145,7 @@ print(np.mean(ps), np.mean(rs))
 ## 5. 주의
 
 - val이 80장뿐이라 수치 변동이 크다.
+- 전체 영상 평가 로그에 `_v2.json not found` 경고가 찍혔지만, 서버의 `xray_coco_33_seg.json`이 이미 원본 좌표(v2 내용) 버전이라 수치는 유효하다(2026-10-22 확인, 이후 경고 제거). 이 json은 annotation id가 0부터 시작해서, id 0인 GT 1개에 매칭된 예측은 FP로 계산된다(41,319개 중 1개, 영향 미미).
 - 전체 영상과 PA-only는 GT가 다르다. PA는 crop된 GT, 전체 영상은 원본 GT(`xray_coco_33_seg_v2.json`)다. 같은 이미지라도 치아 수와 크기 분포가 달라 AP를 직접 비교할 때 주의한다.
 - 결과 파일
   - `outputs/eval_periapical_only/`: `eval.log`, `eval.pth`(segm), `eval/periapical/`(예측 이미지, 원본 | 예측 polygon)

@@ -130,12 +130,16 @@ python -m rfdetr.datasets.xray_overlap_stats --check_tufts_conversion [--ann_dir
 
 - 변환: 사내 labelme repo(`https://github.com/medit-AI/labelme.git`)의 `examples/instance_segmentation/labelme2coco.py`. 라벨을 수정했을 때만 다시 돌린다.
 - 결과: `{cbct_ios_dcm_latest_0824}/annotations.json` (COCO, 원본 좌표). **category id = Universal 번호**다.
-- 로딩: `main.py`의 `coco_directories=[(이미지 폴더, annotations.json)]` → `CocoDetection`. `file_name`의 `\`는 `/`로 바꾼다. 디렉터리는 1개만 지원한다.
-- **train 전용**: `build()`가 train split에만 `coco_directories`를 넘긴다. 데이터셋 인덱스는 ③이 앞쪽, ①②가 뒤쪽이다.
+- 로딩: `main.py`의 `coco_directories=[(이미지 폴더, annotations.json)]` → `CocoDetection`. `file_name`의 `\`는 `/`로 바꾼다. split당 디렉터리는 1개만 지원한다.
+- **split**: `cbct_ios_dcm_latest_1022`부터 `train/`, `val/` 폴더가 나뉘어 있다(`splits.json`, 338 / 85장).
+  - train: `coco_directories` (`.../train/`)
+  - val: `coco_directories_val` (`.../val/`). 지정하지 않으면 예전처럼 ③은 train 전용이다.
+- **평가 GT**: val에서는 `XrayPnoaramicInstanceCoco._merge_own_coco_gt`가 ③ val의 `annotations.json`을 평가 json(①②)에 새 image/annotation id로 합친다. ③ json도 원본 좌표, category id = Universal 번호라 기준이 같다.
+- 데이터셋 인덱스는 ③이 앞쪽, ①②가 뒤쪽이다.
 
 ## 6. 학습 로더에서의 처리 (참고)
 
-- **split**: ①② 각각 파일명 정렬 순서로 train `0~0.85`, val `0.85~0.9`, test `0.9~1.0`이다. ③은 전부 train이다.
+- **split**: ①② 각각 파일명 정렬 순서로 train `0~0.85`, val `0.85~0.9`, test `0.9~1.0`이다. ③은 폴더(`train/`, `val/`)로 나뉜다. xray 데이터셋에서는 test도 val split으로 만든다(`rfdetr/main.py`).
 - **영상**: grayscale로 읽고, 너비 640, 높이 stride 64 배수로 resize한다(비율 유지).
 - **마스크**: `exterior` polygon을 resize 비율로 스케일한 뒤 치아별 채널에 `fillPoly`한다(치아 간 중첩 유지).
 - **라벨 없는 이미지**: 학습 시 class 0의 임의 박스 3개를 넣는다(`is_dummy`). 평가 GT json에는 넣지 않는다.

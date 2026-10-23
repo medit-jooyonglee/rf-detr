@@ -308,9 +308,9 @@ def write_overlap_report(tooth_rows, pair_rows, save_dir, image_count):
     return report_path
 
 
-def main(*, 
+def main(*,
          use_ema=True, with_source_concat=False,
-         test_path='', 
+         test_path='',
          save_dir = 'temp/resultsxray',
          drawing_mode='mask',
          polygon_thickness=None,
@@ -318,6 +318,9 @@ def main(*,
          max_images=None,
          convert=None,
          polygon_epsilon=2.0,
+         input_width=640,
+         segmentation_crop_size=(128, 64),
+         pretrain_weights='outputs/pretrained/segmentation/xray_teeth_seg/bounding_bbox_regularization/checkpoint.pth',
          **kwargs):
     # FIXME: save_path
     from trainer import diskmanager, image_utils
@@ -331,7 +334,9 @@ def main(*,
         if overlap_report is None:
             overlap_report = False
     assert drawing_mode in ['mask', 'polygon'], "Invalid drawing mode specified."
-    model = init_and_get_model(export=False, use_ema=use_ema)
+    model = init_and_get_model(export=False, use_ema=use_ema,
+                                segmentation_crop_size=tuple(segmentation_crop_size),
+                                pretrain_weights=pretrain_weights)
     if overlap_report is None:
         overlap_report = drawing_mode == 'polygon'
     all_tooth_rows, all_pair_rows = [], []
@@ -370,7 +375,7 @@ def main(*,
             break
         # img = cv2.imread(file, cv2.IMREAD_GRAYSCALE)
         img = image_utils.cv2_imread(file, flags=cv2.IMREAD_GRAYSCALE)
-        rsz_img, input_content_box = resize_image(img, stride=64)
+        rsz_img, input_content_box = resize_image(img, stride=64, target_width=input_width)
         img2 = np.repeat(rsz_img[None], 3, axis=0) / 255.
 
         img_tensor = torch_utils.data_convert(img2[None])
@@ -450,12 +455,14 @@ def main(*,
     print(model)
     
 
-def init_and_get_model(config=None, device='cuda', export=False, use_ema=True):
+def init_and_get_model(config=None, device='cuda', export=False, use_ema=True,
+                        segmentation_crop_size=(128, 64),
+                        pretrain_weights='outputs/pretrained/segmentation/xray_teeth_seg/bounding_bbox_regularization/checkpoint.pth'):
     global g_rfdetr_model
     config = config or dict()
     if g_rfdetr_model is None:
         rf_detr = RFDETRSmall(
-            
+
             patch_size=16,
             num_windows=4,
             # num_queries=100,
@@ -464,7 +471,7 @@ def init_and_get_model(config=None, device='cuda', export=False, use_ema=True):
             num_select=35,
             encoder='dinov2_windowed_tiny',
             # encoder='dinov2_windowed_base',
-            
+
             # patch_size=24,
             # num_channels=1,
             # eval=True,
@@ -472,7 +479,7 @@ def init_and_get_model(config=None, device='cuda', export=False, use_ema=True):
             num_classes=32,
             segmentation_head=True,
             segmentation_mode='crop_and_resize',
-            segmentation_crop_size=(128, 64),
+            segmentation_crop_size=segmentation_crop_size,
             coarse_hint_scale=0.35,
             segmentation_crop_box_scale=1.15,
             coarse_hint_dropout=0.30,
@@ -484,7 +491,7 @@ def init_and_get_model(config=None, device='cuda', export=False, use_ema=True):
             # # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_0819_crop_retrain/checkpoint.pth',
             # pretrain_weights='output/xray_teeth33_dinov2tiny_small_seg_crop_regularization/checkpoint.pth',
             # pretrain_weights='output/bounding_bbox/checkpoint.pth',
-            pretrain_weights='outputs/pretrained/segmentation/xray_teeth_seg/bounding_bbox_regularization/checkpoint.pth',
+            pretrain_weights=pretrain_weights,
             # 'output/xray_teeth33_dinov2tiny_small_seg_crop_retrain'
             # 'output/xray_teeth33_dinov2tiny_small_seg_0819_all/eval'
             **config,
@@ -864,6 +871,28 @@ if __name__ == '__main__':
             'RDP polygon simplification error in pixels for Labelme output. '
             '0 disables simplification (default: 2.0).'
         ),
+    )
+    parser.add_argument(
+        '--input-width', '--input_width',
+        dest='input_width',
+        type=int,
+        default=640,
+        help='리사이즈 기준 너비 (cli/main.py --input_width와 동일 기본값). '
+             '학습 때 바꿨다면 추론도 같은 값을 넣어야 한다.',
+    )
+    parser.add_argument(
+        '--segmentation-crop-size', '--segmentation_crop_size',
+        dest='segmentation_crop_size',
+        type=int, nargs=2, default=[128, 64], metavar=('H', 'W'),
+        help='crop_and_resize refinement ROI 크기 (H W, cli/main.py --segmentation_crop_size와 동일 기본값). '
+             '학습 때 바꿨다면 추론도 같은 값을 넣어야 한다.',
+    )
+    parser.add_argument(
+        '--pretrain-weights', '--pretrain_weights',
+        dest='pretrain_weights',
+        type=str,
+        default='outputs/pretrained/segmentation/xray_teeth_seg/bounding_bbox_regularization/checkpoint.pth',
+        help='추론에 사용할 checkpoint 경로.',
     )
     cli_args = parser.parse_args()
     main(
