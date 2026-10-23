@@ -184,3 +184,7 @@ train_test.py
 *.png
 *.jpg
 *.json
+*.pth
+*.txt
+events.out.tfevents*
+*.csv

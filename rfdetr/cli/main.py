@@ -121,6 +121,14 @@ def get_my_arg_parse():
                         # default=True,
                         default='outputs/pretrained/segmentation/xray_teeth_seg/bounding_bbox_regularization/checkpoint.pth',
                         help='Run save results after training')
+    parser.add_argument('--epochs', type=int, default=250, help='학습 epoch 수')
+    parser.add_argument('--input_width', type=int, default=640,
+                        help='리사이즈 기준 너비 (periapical 제외). 실제 입력 너비는 (input_width // 64 + 1) * 64 (640 -> 704, 256 -> 320)')
+    parser.add_argument('--segmentation_crop_size', type=int, nargs=2, default=[128, 64], metavar=('H', 'W'),
+                        help='crop_and_resize refinement ROI 크기 (H W, 4의 배수). 추론(predict)도 같은 값을 써야 한다')
+    parser.add_argument('--checkpoint_interval', type=int, default=30, help='checkpoint{epoch}.pth 저장 주기(epoch)')
+    parser.add_argument('--data_mode', type=str, default='xray', choices=['xray', 'natural'],
+                        help='(Linux) 학습 데이터: xray(파노라마 ①②③) | natural(smile_design_picture 사진, coco만)')
     parser.add_argument('--output_dir', type=str,
                         default='output/xray_teeth33_dinov2tiny_small_seg_crop_regularization',
                         help='학습 결과(checkpoint, log) 저장 경로')
@@ -191,32 +199,63 @@ def train_from_xray_teeth_dir():
         annot_file = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_coco_33_seg_v2.json'
         # json file_name 상대경로 기준 (dataset_dir들의 공통 상위 폴더)
         json_base_dirs = ['E:/dataset/reverse_tomosynthesis/kaggle_xrays']
+        coco_directories_val = None  # 0824 데이터는 train/val 미분할
     elif platform.system().lower() == 'linux':
         
-    
+        mode = get_my_arg_parse().data_mode
         
-        dataset_dir = [
-            '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2/',
-            '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/',
-            # '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/'
+        if mode == 'xray':
             
-        ]
-        coco_directories = [
-                # ('E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm', 
-                # 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm/annotations.json')
-                ('/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_0824/', 
-                '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_0824/annotations.json')
+            dataset_dir = [
+                '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_teeth_seg_kaggle/Teeth Segmentation JSON/d2/',
+                '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/',
+                # '/data1/jooyonglee/reverse_tomo/xray_panoramic/kaggle_2222/'
+                
             ]
-    
-        annot_file = '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_coco_33_seg.json'
-        json_base_dirs = ['/data1/jooyonglee/reverse_tomo/xray_panoramic']
+            coco_directories = [
+                    # ('E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm', 
+                    # 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm/annotations.json')
+                    ('/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1022/train/', 
+                    '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1022/train/annotations.json')
+                ]
+            # ③ 자체 데이터 val split (평가 GT에 합쳐서 평가)
+            coco_directories_val = [
+                    ('/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1022/val/',
+                    '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1022/val/annotations.json')
+                ]
+            
+            # coco_directories_val = None
+        
+            annot_file = '/data1/jooyonglee/reverse_tomo/xray_panoramic/xray_coco_33_seg.json'
+            json_base_dirs = ['/data1/jooyonglee/reverse_tomo/xray_panoramic']
+        elif mode == 'natural':
+            
+            dataset_dir = [
+                
+            ]
+            coco_directories = [
+                    ('/data1/jooyonglee/smile_design_picture/samples/train/', 
+                    '/data1/jooyonglee/smile_design_picture/samples/train/annotations.json')
+                ]
+            # ③ 자체 데이터 val split (평가 GT에 합쳐서 평가)
+            coco_directories_val = [
+                    ('/data1/jooyonglee/smile_design_picture/samples/train/', 
+                    '/data1/jooyonglee/smile_design_picture/samples/train/annotations.json')
+                ]
+            
+            # coco_directories_val = None
+        
+            annot_file = ''
+            json_base_dirs = []
+            
     args = get_my_arg_parse()
 
     if torch.device(args.device).type == 'cuda':
         torch.cuda.set_device(torch.device(args.device))
     # 평가 GT json: 기존 json은 images[].width/height, area가 리사이즈 기준이라 segm 평가가 0이 된다.
     # 원본 좌표로 재빌드한 *_v2.json을 쓴다. (docs/troubleshoots/xray_coco_json_segm_eval.md)
-    annot_file_v2 = annot_file.replace('.json', '_v2.json')
+    # Windows(xray_coco_33_seg_v2.json), Linux(xray_coco_33_seg.json) 모두 annot_file이 이미 원본 좌표(v2) json이다
+    annot_file_v2 = annot_file
     if args.build_tufts:
         # ② Tufts 포맷 변환 (평가 json의 Tufts polygon도 ann/*.json에서 읽으므로 --build_json보다 먼저)
         from rfdetr.util.dataloader import tufts_to_coco
@@ -245,10 +284,12 @@ def train_from_xray_teeth_dir():
                               num=args.save_crop_samples, num_classes=args.num_classes, cfg=mode_cfgs[mode])
     if args.build_tufts or args.build_json or args.save_crop_samples > 0:
         return
-    if os.path.exists(annot_file_v2):
+    if not annot_file:
+        pass  # 평가 json 없이 coco_directories의 GT로 평가 (natural)
+    elif os.path.exists(annot_file_v2):
         annot_file = annot_file_v2
     else:
-        print(f'[warning] {annot_file_v2} not found. segm eval will be wrong with {annot_file}. run with --build_json first.')
+        print(f'[warning] {annot_file_v2} not found. run with --build_json first.')
 
     # dataset_dir = args.coco_dir
     num_classes = args.num_classes
@@ -290,7 +331,7 @@ def train_from_xray_teeth_dir():
         num_classes=num_classes,
         segmentation_head=args.segmentation_head,
         segmentation_mode='crop_and_resize',
-        segmentation_crop_size=(128, 64),
+        segmentation_crop_size=tuple(args.segmentation_crop_size),
         coarse_hint_scale=0.35,
         refine_outer_boundary_loss_coef=4.0,
         segmentation_crop_box_scale=1.15,
@@ -320,7 +361,8 @@ def train_from_xray_teeth_dir():
     rf_detr.train(
         dataset_dir=dataset_dir,
         coco_directories=coco_directories,
-        epochs=250,
+        coco_directories_val=coco_directories_val,
+        epochs=args.epochs,
         device=args.device,
         dataset_file='xray_teeth',
         # coco_path=teeth_dir,
@@ -338,12 +380,13 @@ def train_from_xray_teeth_dir():
         group_detr=5,
         num_select=35,
         segmentation_mode='crop_and_resize',
-        segmentation_crop_size=(128, 64),
+        segmentation_crop_size=tuple(args.segmentation_crop_size),
         coarse_hint_scale=0.35,
         refine_outer_boundary_loss_coef=4.0,
         segmentation_crop_box_scale=1.15,
         coarse_hint_dropout=0.30,
-        checkpoint_interval = 30,
+        checkpoint_interval=args.checkpoint_interval,
+        input_width=args.input_width,
         output_dir=args.output_dir,
         # annot_file='../../xray_coco_33.json',
         # annot_file='../../xray_coco_33.json',
@@ -423,3 +466,17 @@ if __name__ == "__main__":
 
     # coco_dir = 'E:/dataset/coco/base'
     # train_from_coco_dir(coco_dir)
+
+
+
+# nohup python -m rfdetr.cli.main \
+#   --data_mode natural \  
+#   --xray_crop_mode teeth_roi --xray_crop_prob 1.0 \
+#   --eval_xray_crop \
+#   --input_width 256 \
+#   --segmentation_crop_size 64 48 \
+#   --epochs 400 \
+#   --checkpoint_interval 100 \
+#   --batch_size 1 \
+#   --device cuda:5 \
+#   --output_dir outputs/natural_teeth_roi > logs/natural_teeth_roi.log 2>&1 &

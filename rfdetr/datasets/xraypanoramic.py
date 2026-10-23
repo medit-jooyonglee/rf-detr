@@ -54,6 +54,7 @@ class XrayPnoramic(Dataset):
                  splits={},
                  path_lists=[],
                  target_mode: Literal['edge'] = 'edge',
+                 input_width: int = 640,
                  **kwargs):
         super(XrayPnoramic, self).__init__()
         
@@ -63,7 +64,8 @@ class XrayPnoramic(Dataset):
         self.splits = splits.get(name, (0, 1))
         
         
-        self.target_width = 640
+        # 리사이즈 기준 너비. 실제 입력 너비는 stride 올림으로 (input_width // 64 + 1) * 64 (640 -> 704)
+        self.target_width = input_width
         self.source_files = []
         self.gt_files = []
         self.deep_search_files(path_lists)
@@ -1245,9 +1247,19 @@ class XrayPnoaramicInstanceCoco(CocoDetection):
         )
         
         self.index_coco_id = []
+        if annot_file is None:
+            # 평가 json 없음: 빈 GT로 시작하고 val이면 아래에서 coco_directories GT를 합친다
+            own = self.base_datset.coco_apis
+            categories = copy.deepcopy(own.coco.dataset.get('categories', [])) if own is not None else []
+            self.coco.dataset = {'images': [], 'annotations': [], 'categories': categories}
+            self.coco.createIndex()
+            num_coco = len(own) if own is not None else 0
+            assert num_coco == len(self.base_datset), 'annot_file 없이 쓸 때는 coco_directories 데이터만 지원'
+            if num_coco > 0 and self.base_datset.name != 'train':
+                self.index_coco_id = self._merge_own_coco_gt(num_coco)
             
         # image id mapping    / rf-detr evaluatiopn. mapping....
-        if len(self.coco.imgs) > 0:
+        if annot_file is not None and len(self.coco.imgs) > 0:
             # image id 값을 직접 쓴다 (id가 0..N-1 연속이 아니어도 동작)
             meta = self.coco.loadImgs(self.coco.getImgIds())
             img_id_mapping = {v['file_name'].replace('\\', '/').lower(): v['id'] for v in meta}
@@ -1265,15 +1277,46 @@ class XrayPnoaramicInstanceCoco(CocoDetection):
                         break
                 matched_idx.append(matched)
 
-            # ③ 자체 coco 데이터(train 전용)는 평가 json에 없으므로 매칭 대상에서 제외
+            # ③ 자체 coco 데이터는 평가 json에 없으므로 매칭 대상에서 제외
             num_coco = len(self.base_datset.coco_apis) if self.base_datset.coco_apis is not None else 0
             unmatched = [source_clean[i] for i in range(num_coco, len(source_clean)) if matched_idx[i] < 0]
             assert not unmatched, f'{len(unmatched)} images are not found in annotation json {annot_file}. e.g. {unmatched[:3]}'
+            if num_coco > 0 and self.base_datset.name != 'train':
+                # ③ val split은 자체 annotations.json의 GT를 평가 json에 합친다
+                matched_idx[:num_coco] = self._merge_own_coco_gt(num_coco)
             self.index_coco_id = matched_idx
 
         if (self.base_datset.name != 'train' and self.base_datset.eval_xray_crop
                 and self.base_datset.xray_crop_modes):
             self._rebuild_crop_eval_coco()
+
+    def _merge_own_coco_gt(self, num_coco):
+        """③ 자체 coco(val)의 images/annotations를 평가 GT(self.coco)에 새 id로 추가하고, 데이터셋 앞쪽 num_coco개의 image id를 반환한다.
+
+        ③ annotations.json은 원본 좌표, category id = universal 번호라 평가 json(_v2)과 기준이 같다.
+        """
+        own = self.base_datset.coco_apis
+        dataset = self.coco.dataset
+        next_image_id = max([img['id'] for img in dataset['images']], default=-1) + 1
+        next_ann_id = max([ann['id'] for ann in dataset['annotations']], default=0) + 1  # 0은 COCOeval에서 "매칭 안 됨"
+        category_ids = {cat['id'] for cat in dataset['categories']}
+        image_ids = []
+        for i in range(num_coco):
+            src_id = own.ids[i]
+            img = own.coco.imgs[src_id]
+            new_id = next_image_id + i
+            dataset['images'].append(dict(id=new_id, file_name=img['file_name'].replace('\\', '/'),
+                                          width=img['width'], height=img['height']))
+            for ann in own.coco.imgToAnns.get(src_id, []):
+                if ann.get('iscrowd', 0) or ann['category_id'] not in category_ids:
+                    continue
+                dataset['annotations'].append(dict(ann, id=next_ann_id, image_id=new_id))
+                next_ann_id += 1
+            image_ids.append(new_id)
+        self.coco.createIndex()
+        print(f'merged own coco gt: images={num_coco}, total images={len(dataset["images"])}, '
+              f'annotations={len(dataset["annotations"])}')
+        return image_ids
 
     def _rebuild_crop_eval_coco(self):
         """원본 전체 영상 GT 대신 실제 검증 입력의 crop/mask를 평가 좌표로 변환한다."""
@@ -1765,19 +1808,20 @@ def build(image_set, args, resolution):
     args_dict = copy.deepcopy(dict(args.__dict__))
     # args_dict = 
     annot_file = args_dict.pop('annot_file', '../../xray_coco.json')
-    if os.path.exists(annot_file):
+    if not annot_file:
+        # 평가 json 없이 coco 데이터(coco_directories)만 쓰는 경우 (예: natural 사진). val GT는 coco annotations.json에서 만든다
+        annot_file = None
+    elif os.path.exists(annot_file):
         pass
     else:
         annot_file = os.path.join(img_folder, annot_file)
         assert os.path.exists(annot_file), f'annotation file not found: {annot_file}'
     # annot_file = 
     # annot_file
-    if image_set == 'train':
-        # args_dict['augment_en'] = True
-        coco_directories = args_dict.pop('coco_directories', None)
-    else:
-        args_dict.pop('coco_directories', None)
-        coco_directories = None
+    # ③ 자체 coco 데이터: train / val 폴더가 나뉘어 있으면 split별로 지정 (coco_directories_val 없으면 val은 ①②만)
+    train_coco_directories = args_dict.pop('coco_directories', None)
+    val_coco_directories = args_dict.pop('coco_directories_val', None)
+    coco_directories = train_coco_directories if image_set == 'train' else val_coco_directories
         
 
     dataset = XrayPnoaramicInstanceCoco(
