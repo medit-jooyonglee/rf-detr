@@ -478,6 +478,63 @@ def create_albu_transform(max_rotate_degree=8, **params):
         keypoint_params=A.KeypointParams(format='xy', remove_invisible=False)
     )
     
+def merge_coco_directories(coco_directories, include_masks):
+    """Merge several (img_folder, annot_file) COCO sources into one CocoDetection,
+    so downstream positional indexing (coco_apis[i], coco_apis.ids) and attribute
+    access (coco_apis.coco.*) keep working unchanged regardless of source count.
+
+    Each source's file_name is rewritten to an absolute path before merging, so
+    the merged object's single `root` (torchvision keeps the first source's
+    img_folder) is never actually used to resolve paths -- os.path.join collapses
+    to the absolute path regardless of what `root` is. image/annotation ids are
+    offset per source to avoid collisions across sources' independently-numbered
+    jsons. Categories must line up with the first (primary) source's category ids;
+    annotations referencing an id outside that set are dropped, mirroring the
+    existing `_merge_own_coco_gt` convention elsewhere in this file.
+    """
+    sources = [
+        CocoDetection(img_folder, annot_file, None, include_masks)
+        for img_folder, annot_file in coco_directories
+    ]
+    for (img_folder, _), source in zip(coco_directories, sources):
+        for image_info in source.coco.dataset.get('images', []):
+            file_name = image_info.get('file_name')
+            if isinstance(file_name, str):
+                abs_path = os.path.normpath(os.path.join(img_folder, file_name.replace('\\', '/')))
+                image_info['file_name'] = abs_path.replace('\\', '/')
+        source.coco.createIndex()
+
+    primary = sources[0]
+    if len(sources) == 1:
+        return primary
+
+    dataset = primary.coco.dataset
+    category_ids = {cat['id'] for cat in dataset['categories']}
+    for source in sources[1:]:
+        next_image_id = max((img['id'] for img in dataset['images']), default=-1) + 1
+        next_ann_id = max((ann['id'] for ann in dataset['annotations']), default=0) + 1
+        skipped = 0
+        for i, old_id in enumerate(source.ids):
+            img = source.coco.imgs[old_id]
+            new_id = next_image_id + i
+            dataset['images'].append(dict(img, id=new_id))
+            for ann in source.coco.imgToAnns.get(old_id, []):
+                if ann.get('iscrowd', 0) or ann['category_id'] not in category_ids:
+                    skipped += 1
+                    continue
+                dataset['annotations'].append(dict(ann, id=next_ann_id, image_id=new_id))
+                next_ann_id += 1
+        if skipped:
+            print(f'[merge_coco_directories] skipped {skipped} annotations '
+                  f'(iscrowd or category_id not in primary source) from a secondary coco_directories entry')
+
+    primary.coco.createIndex()
+    primary.ids = list(sorted(primary.coco.imgs.keys()))
+    print(f'merged {len(coco_directories)} coco_directories: '
+          f'images={len(dataset["images"])}, annotations={len(dataset["annotations"])}')
+    return primary
+
+
 class XrayPnoaramicInstance(XrayPnoramic):
     def __init__(self, 
                  
@@ -519,19 +576,7 @@ class XrayPnoaramicInstance(XrayPnoramic):
         }
         self.coco_directories = coco_directories
         if coco_directories is not None and len(coco_directories) > 0:
-            # TODO: complete merge of coco datasets
-            assert len(coco_directories) == 1, 'we only support one coco directory for now. '
-            coco_img_folder, coco_annot_file = coco_directories[0]
-            self.coco_apis = CocoDetection(coco_img_folder, coco_annot_file, None, include_masks)
-            
-            # \\ -> / handling...
-            coco = self.coco_apis.coco
-            for image_info in coco.dataset.get("images", []):
-                file_name = image_info.get("file_name")
-
-                if isinstance(file_name, str):
-                    image_info["file_name"] = file_name.replace("\\", "/")
-            coco.createIndex()
+            self.coco_apis = merge_coco_directories(coco_directories, include_masks)
         else:
             self.coco_apis = None
         self.augment_en = augment_en

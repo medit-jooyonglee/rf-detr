@@ -29,6 +29,7 @@ MODELS = {
     'pretrained': ROOT / 'outputs/pretrained/segmentation/xray_teeth_seg/bounding_bbox_regularization/checkpoint.pth',
     'parent': ROOT / 'outputs/fine_tune_pa_teeth_roi_padding_fixed/checkpoint_best_total.pth',
     'best': ROOT / 'outputs/fine_tune_own1022/checkpoint_best_total.pth',
+    'continue': ROOT / 'outputs/fine_tune_own1022_continue/checkpoint_best_total.pth',
 }
 THRESHOLD = .3
 

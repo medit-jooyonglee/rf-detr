@@ -43,7 +43,12 @@ class ModelConfig(BaseModel):
     segmentation_crop_box_scale: float = 1.15
     coarse_hint_dropout: float = 0.30
     refine_outer_boundary_loss_coef: float = 4.0
-    
+    # extra weight on a BCE term restricted to pixels where this instance's GT
+    # mask is also covered by a neighboring instance's GT mask (crop_and_resize only).
+    # helps the refine head keep predicting into genuinely overlapping teeth instead
+    # of shrinking away from the shared region.
+    overlap_loss_coef: float = 4.0
+
     # dino-v2 antialias option
     antialias: bool = True
     # vanila - bicubim, for coreml-support, default value is changed as bilinear
@@ -178,6 +183,7 @@ class TrainConfig(BaseModel):
     segmentation_crop_box_scale: float = 1.15
     coarse_hint_dropout: float = 0.30
     refine_outer_boundary_loss_coef: float = 4.0
+    overlap_loss_coef: float = 4.0
 
 
 class SegmentationTrainConfig(TrainConfig):

@@ -155,6 +155,20 @@ def get_my_arg_parse():
     parser.add_argument('--build_json', action='store_true',
                         help='학습 dataset_dir로 평가 GT coco json(원본 좌표, *_v2.json)을 재빌드/검증하고 종료 '
                              '(기존 _v2.json은 자동 백업). --build_tufts와 같이 주면 Tufts 변환 후 빌드')
+    parser.add_argument('--mask_boundary_loss_coef', type=float, default=0.0,
+                        help='GT 경계 근처 픽셀 BCE 가중치(coarse+crop_and_resize 둘 다). 0=비활성화(기본). '
+                             '코드 내부 기본값은 2.0(lwdetr.py). 활성화하려면 예: --mask_boundary_loss_coef 2.0')
+    parser.add_argument('--refine_outer_boundary_loss_coef', type=float, default=0.0,
+                        help='crop_and_resize에서 GT 바깥쪽(false-positive) 경계 링 BCE 가중치. 0=비활성화(기본). '
+                             '코드 내부 기본값은 4.0. 활성화하려면 예: --refine_outer_boundary_loss_coef 4.0')
+    parser.add_argument('--overlap_loss_coef', type=float, default=0.0,
+                        help='crop_and_resize에서 이웃 치아와 겹치는 GT 영역에 추가 BCE 가중치(신규, 중첩 영역 학습 강화용). '
+                             '0=비활성화(기본). 활성화하려면 예: --overlap_loss_coef 4.0')
+    parser.add_argument('--lr', type=float, default=1e-4, help='head/decoder 학습률 (코드 기본값 1e-4)')
+    parser.add_argument('--lr_encoder', type=float, default=1.5e-4,
+                        help='DINOv2 backbone 학습률 (코드 기본값 1.5e-4, head lr보다 큼). '
+                             '작은 데이터셋으로 freeze_encoder=False 전체 파인튜닝 시 catastrophic forgetting 방지하려면 '
+                             'head lr보다 훨씬 낮게(예: 1e-5) 줄 것')
 
     # parser.add_argument('--pretrain_weights', type=str,
     #                     # default=True, 
@@ -235,12 +249,20 @@ def train_from_xray_teeth_dir():
             ]
             coco_directories = [
                     ('/data1/jooyonglee/smile_design_picture/samples/train/', 
-                    '/data1/jooyonglee/smile_design_picture/samples/train/annotations.json')
+                    '/data1/jooyonglee/smile_design_picture/samples/train/annotations.json'),
+                    (
+                        '/data1/jooyonglee/smile_design_picture/flux2/sub_samples/train/',
+                        '/data1/jooyonglee/smile_design_picture/flux2/sub_samples/train/annotations.json',
+                    )
                 ]
             # ③ 자체 데이터 val split (평가 GT에 합쳐서 평가)
             coco_directories_val = [
                     ('/data1/jooyonglee/smile_design_picture/samples/train/', 
-                    '/data1/jooyonglee/smile_design_picture/samples/train/annotations.json')
+                    '/data1/jooyonglee/smile_design_picture/samples/train/annotations.json'),
+                    (
+                        '/data1/jooyonglee/smile_design_picture/flux2/sub_samples/val/',
+                        '/data1/jooyonglee/smile_design_picture/flux2/sub_samples/val/annotations.json',
+                    )
                 ]
             
             # coco_directories_val = None
@@ -333,7 +355,8 @@ def train_from_xray_teeth_dir():
         segmentation_mode='crop_and_resize',
         segmentation_crop_size=tuple(args.segmentation_crop_size),
         coarse_hint_scale=0.35,
-        refine_outer_boundary_loss_coef=4.0,
+        refine_outer_boundary_loss_coef=args.refine_outer_boundary_loss_coef,
+        overlap_loss_coef=args.overlap_loss_coef,
         segmentation_crop_box_scale=1.15,
         coarse_hint_dropout=0.30,
         # pretrain_weights="output/xray_teeth33_dinov2tiny_small_seg_crop_retrain/checkpoint0059.pth",
@@ -382,7 +405,11 @@ def train_from_xray_teeth_dir():
         segmentation_mode='crop_and_resize',
         segmentation_crop_size=tuple(args.segmentation_crop_size),
         coarse_hint_scale=0.35,
-        refine_outer_boundary_loss_coef=4.0,
+        refine_outer_boundary_loss_coef=args.refine_outer_boundary_loss_coef,
+        overlap_loss_coef=args.overlap_loss_coef,
+        mask_boundary_loss_coef=args.mask_boundary_loss_coef,
+        lr=args.lr,
+        lr_encoder=args.lr_encoder,
         segmentation_crop_box_scale=1.15,
         coarse_hint_dropout=0.30,
         checkpoint_interval=args.checkpoint_interval,

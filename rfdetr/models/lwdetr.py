@@ -645,13 +645,15 @@ class SetCriterion(nn.Module):
 
         crop_logits = []
         crop_targets = []
+        crop_overlaps = []
         for logits, target in zip(logits_per_image, targets):
             target_crop_boxes = expand_normalized_boxes(
                 target['boxes'], self.segmentation_crop_box_scale
             )
             # collate_fn pads masks, but target boxes stay normalized to target['size'].
+            full_masks = target['masks'][..., :int(target['size'][0]), :int(target['size'][1])].float()
             target_crops = crop_instance_masks(
-                target['masks'][..., :int(target['size'][0]), :int(target['size'][1])],
+                full_masks,
                 target_crop_boxes,
                 self.segmentation_crop_size,
             )
@@ -660,8 +662,19 @@ class SetCriterion(nn.Module):
                     f"Crop mask shape mismatch: {tuple(logits.shape)} != "
                     f"{tuple(target_crops.shape)}"
                 )
+            # Per-instance footprint that's also claimed by at least one sibling
+            # instance in the same image (teeth that genuinely touch/overlap),
+            # cropped with that instance's own box so it lines up with target_crops.
+            covered_by_others = (full_masks.sum(dim=0, keepdim=True) - full_masks) > 0.5
+            overlap_full = full_masks * covered_by_others
+            overlap_crops = crop_instance_masks(
+                overlap_full,
+                target_crop_boxes,
+                self.segmentation_crop_size,
+            )
             crop_logits.append(logits)
             crop_targets.append(target_crops)
+            crop_overlaps.append(overlap_crops)
 
         if not crop_logits or sum(item.shape[0] for item in crop_logits) == 0:
             zero = outputs['pred_logits'].sum() * 0.0
@@ -670,10 +683,12 @@ class SetCriterion(nn.Module):
                 'loss_mask_refine_dice': zero,
                 'loss_mask_refine_boundary': zero,
                 'loss_mask_refine_outer': zero,
+                'loss_mask_refine_overlap': zero,
             }
 
         src_masks = torch.cat(crop_logits, dim=0)
         target_masks = torch.cat(crop_targets, dim=0).to(src_masks.dtype)
+        overlap_masks = torch.cat(crop_overlaps, dim=0).to(src_masks.dtype)
         loss_mask_refine_ce = F.binary_cross_entropy_with_logits(
             src_masks, target_masks, reduction='none'
         ).mean(dim=(1, 2)).mean()
@@ -701,12 +716,21 @@ class SetCriterion(nn.Module):
             (boundary_bce * outer_ring).sum(dim=(1, 2))
             / outer_ring.sum(dim=(1, 2)).clamp_min(1.0)
         ).mean()
+        # Instances with no overlapping sibling contribute 0 here (numerator and
+        # clamped denominator both reflect an empty region), so this only pulls on
+        # genuinely touching/overlapping teeth instead of diluting into the mean
+        # over mostly-non-overlapping crops the way the plain ce/dice terms do.
+        loss_mask_refine_overlap = (
+            (boundary_bce * overlap_masks).sum(dim=(1, 2))
+            / overlap_masks.sum(dim=(1, 2)).clamp_min(1.0)
+        ).mean()
 
         return {
             'loss_mask_refine_ce': loss_mask_refine_ce,
             'loss_mask_refine_dice': loss_mask_refine_dice,
             'loss_mask_refine_boundary': loss_mask_refine_boundary,
             'loss_mask_refine_outer': loss_mask_refine_outer,
+            'loss_mask_refine_overlap': loss_mask_refine_overlap,
         }
 
     def loss_masks(self, outputs, targets, indices, num_boxes):
@@ -1212,6 +1236,9 @@ def build_criterion_and_postprocessors(args):
         )
         weight_dict['loss_mask_refine_outer'] = getattr(
             args, 'refine_outer_boundary_loss_coef', 4.0
+        )
+        weight_dict['loss_mask_refine_overlap'] = getattr(
+            args, 'overlap_loss_coef', 4.0
         )
 
     losses = ['labels', 'boxes', 'cardinality']

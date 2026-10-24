@@ -903,6 +903,9 @@ nohup python rfdetr/cli/main.py \
 가슴주변부 상반신샷 
 105x240x
 
+crop_size
+48, 48 이면 충분
+
 
 """
 
