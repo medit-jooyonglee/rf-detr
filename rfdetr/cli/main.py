@@ -230,12 +230,20 @@ def train_from_xray_teeth_dir():
                     # ('E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm', 
                     # 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm/annotations.json')
                     ('/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1022/train/', 
-                    '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1022/train/annotations.json')
+                    '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1022/train/annotations.json'),
+                    (
+                        '/data1/jooyonglee/reverse_tomo/xray_panoramic/seoul_univ_inspect_COCO/train/',
+                        '/data1/jooyonglee/reverse_tomo/xray_panoramic/seoul_univ_inspect_COCO/train/annotations.json',
+                    )
                 ]
             # ③ 자체 데이터 val split (평가 GT에 합쳐서 평가)
             coco_directories_val = [
                     ('/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1022/val/',
-                    '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1022/val/annotations.json')
+                    '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1022/val/annotations.json'),
+                                        (
+                        '/data1/jooyonglee/reverse_tomo/xray_panoramic/seoul_univ_inspect_COCO/val/',
+                        '/data1/jooyonglee/reverse_tomo/xray_panoramic/seoul_univ_inspect_COCO/val/annotations.json',
+                    )
                 ]
             
             # coco_directories_val = None
@@ -251,18 +259,34 @@ def train_from_xray_teeth_dir():
                     ('/data1/jooyonglee/smile_design_picture/samples/train/', 
                     '/data1/jooyonglee/smile_design_picture/samples/train/annotations.json'),
                     (
-                        '/data1/jooyonglee/smile_design_picture/flux2/sub_samples/train/',
-                        '/data1/jooyonglee/smile_design_picture/flux2/sub_samples/train/annotations.json',
-                    )
+                        '/data1/jooyonglee/smile_design_picture/flux2/flux2/sub_samples_coco/train/',
+                        '/data1/jooyonglee/smile_design_picture/flux2/flux2/sub_samples_coco/train/annotations.json',
+                    ),
+                    (
+                        '/data1/jooyonglee/smile_design_picture/unsplash/unsplash_originals_resize_subsample_COCO/train/',
+                        '/data1/jooyonglee/smile_design_picture/unsplash/unsplash_originals_resize_subsample_COCO/train/annotations.json'
+                    ),
+                    (
+                        '/data1/jooyonglee/smile_design_picture/unsplash/unsplash_bundle_1793251327703_COCO/train/',
+                        '/data1/jooyonglee/smile_design_picture/unsplash/unsplash_bundle_1793251327703_COCO/train/annotations.json'
+                    ),
                 ]
             # ③ 자체 데이터 val split (평가 GT에 합쳐서 평가)
             coco_directories_val = [
-                    ('/data1/jooyonglee/smile_design_picture/samples/train/', 
-                    '/data1/jooyonglee/smile_design_picture/samples/train/annotations.json'),
+                    ('/data1/jooyonglee/smile_design_picture/samples/val/', 
+                    '/data1/jooyonglee/smile_design_picture/samples/val/annotations.json'),
                     (
-                        '/data1/jooyonglee/smile_design_picture/flux2/sub_samples/val/',
-                        '/data1/jooyonglee/smile_design_picture/flux2/sub_samples/val/annotations.json',
-                    )
+                        '/data1/jooyonglee/smile_design_picture/flux2/flux2/sub_samples_coco/val/',
+                        '/data1/jooyonglee/smile_design_picture/flux2/flux2/sub_samples_coco/val/annotations.json',
+                    ),
+                    (
+                        '/data1/jooyonglee/smile_design_picture/unsplash/unsplash_originals_resize_subsample_COCO/val/',
+                        '/data1/jooyonglee/smile_design_picture/unsplash/unsplash_originals_resize_subsample_COCO/val/annotations.json'
+                    ),
+                    (
+                        '/data1/jooyonglee/smile_design_picture/unsplash/unsplash_bundle_1793251327703_COCO/val/',
+                        '/data1/jooyonglee/smile_design_picture/unsplash/unsplash_bundle_1793251327703_COCO/val/annotations.json'
+                    ),                  
                 ]
             
             # coco_directories_val = None

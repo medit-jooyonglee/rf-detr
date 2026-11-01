@@ -491,6 +491,11 @@ def merge_coco_directories(coco_directories, include_masks):
     jsons. Categories must line up with the first (primary) source's category ids;
     annotations referencing an id outside that set are dropped, mirroring the
     existing `_merge_own_coco_gt` convention elsewhere in this file.
+
+    Images whose file_name doesn't exist on disk (e.g. manually deleted after the
+    json was written) are dropped here too, together with their annotations, so
+    every downstream index (coco_apis[i], file_name(i), index_coco_id, ...) only
+    ever points at a real file instead of crashing deep inside a DataLoader worker.
     """
     sources = [
         CocoDetection(img_folder, annot_file, None, include_masks)
@@ -505,33 +510,39 @@ def merge_coco_directories(coco_directories, include_masks):
         source.coco.createIndex()
 
     primary = sources[0]
-    if len(sources) == 1:
-        return primary
-
     dataset = primary.coco.dataset
-    category_ids = {cat['id'] for cat in dataset['categories']}
-    for source in sources[1:]:
-        next_image_id = max((img['id'] for img in dataset['images']), default=-1) + 1
-        next_ann_id = max((ann['id'] for ann in dataset['annotations']), default=0) + 1
-        skipped = 0
-        for i, old_id in enumerate(source.ids):
-            img = source.coco.imgs[old_id]
-            new_id = next_image_id + i
-            dataset['images'].append(dict(img, id=new_id))
-            for ann in source.coco.imgToAnns.get(old_id, []):
-                if ann.get('iscrowd', 0) or ann['category_id'] not in category_ids:
-                    skipped += 1
-                    continue
-                dataset['annotations'].append(dict(ann, id=next_ann_id, image_id=new_id))
-                next_ann_id += 1
-        if skipped:
-            print(f'[merge_coco_directories] skipped {skipped} annotations '
-                  f'(iscrowd or category_id not in primary source) from a secondary coco_directories entry')
+    if len(sources) > 1:
+        category_ids = {cat['id'] for cat in dataset['categories']}
+        for source in sources[1:]:
+            next_image_id = max((img['id'] for img in dataset['images']), default=-1) + 1
+            next_ann_id = max((ann['id'] for ann in dataset['annotations']), default=0) + 1
+            skipped = 0
+            for i, old_id in enumerate(source.ids):
+                img = source.coco.imgs[old_id]
+                new_id = next_image_id + i
+                dataset['images'].append(dict(img, id=new_id))
+                for ann in source.coco.imgToAnns.get(old_id, []):
+                    if ann.get('iscrowd', 0) or ann['category_id'] not in category_ids:
+                        skipped += 1
+                        continue
+                    dataset['annotations'].append(dict(ann, id=next_ann_id, image_id=new_id))
+                    next_ann_id += 1
+            if skipped:
+                print(f'[merge_coco_directories] skipped {skipped} annotations '
+                      f'(iscrowd or category_id not in primary source) from a secondary coco_directories entry')
+        print(f'merged {len(coco_directories)} coco_directories: '
+              f'images={len(dataset["images"])}, annotations={len(dataset["annotations"])}')
+
+    missing = [img for img in dataset['images'] if not os.path.exists(img['file_name'])]
+    if missing:
+        missing_ids = {img['id'] for img in missing}
+        dataset['images'] = [img for img in dataset['images'] if img['id'] not in missing_ids]
+        dataset['annotations'] = [ann for ann in dataset['annotations'] if ann['image_id'] not in missing_ids]
+        print(f'[merge_coco_directories] dropped {len(missing)} images with missing files on disk '
+              f'(e.g. {missing[0]["file_name"]})')
 
     primary.coco.createIndex()
     primary.ids = list(sorted(primary.coco.imgs.keys()))
-    print(f'merged {len(coco_directories)} coco_directories: '
-          f'images={len(dataset["images"])}, annotations={len(dataset["annotations"])}')
     return primary
 
 
@@ -627,9 +638,19 @@ class XrayPnoaramicInstance(XrayPnoramic):
             logger.info(f'xray crop augmentation: probs={self.xray_crop_modes}, full_image={full_prob:.2f}, '
                         f'cfg={self.xray_crop_cfg}')
 
-    def _sample_crop_plan(self, boxes_xyxy, labels, img_hw, index=0):
+    # peri(peri apical) 데이터셋은 이미 periapical 형태로 구성되어 있으므로, 파일명에
+    # 이 키워드가 들어가면 xray_crop_mode(periapical/teeth_roi) 재적용 대상에서 제외한다.
+    PERI_FILENAME_KEYWORDS = ('peri',)
+
+    def _is_peri_filename(self, full_index):
+        filename = os.path.basename(self.file_name(full_index)).casefold()
+        return any(k.casefold() in filename for k in self.PERI_FILENAME_KEYWORDS)
+
+    def _sample_crop_plan(self, boxes_xyxy, labels, img_hw, index=0, full_index=None):
         """원본 해상도 기준 crop 계획 (xray_crop_aug.sample_crop). 비활성/전체 영상 선택/실패 시 None."""
         if not self.xray_crop_modes or (self.name != 'train' and not self.eval_xray_crop) or len(boxes_xyxy) == 0:
+            return None
+        if self._is_peri_filename(index if full_index is None else full_index):
             return None
         from rfdetr.datasets.xray_crop_aug import pick_crop_mode, sample_crop
         # 검증에서는 GT 재빌드/worker/epoch와 무관하게 같은 이미지에 같은 crop 적용.
@@ -742,10 +763,10 @@ class XrayPnoaramicInstance(XrayPnoramic):
             return self.source_files[index]
     
     def parse_item_coco(self, index, norm_bbox=True, box_format: Literal['xcycwh', 'xywh']='xcycwh', return_raw_annotation=False):
-        # 
+        #
         # self.coco_apis.coco.dataset.get('images')
 
-        
+        full_index = index
         if self.coco_apis is not None:
             if index < len(self.coco_apis):
                 return self._read_coco_image(index)
@@ -847,7 +868,7 @@ class XrayPnoaramicInstance(XrayPnoramic):
 
         # xray_crop_mode (periapical / teeth_roi): 원본 해상도에서 crop 후 이하 기존 파이프라인 그대로.
         # 라벨 매핑 전(universal 번호)이라 상악/하악 구분이 가능하다.
-        crop_plan = self._sample_crop_plan(bboxes, class_labels, src.shape[:2], index=index)
+        crop_plan = self._sample_crop_plan(bboxes, class_labels, src.shape[:2], index=index, full_index=full_index)
         crop_valid = None  # PA 모서리 유효영역 (1: 영상, 0: 잘린 모서리)
         if crop_plan is not None:
             from rfdetr.datasets.xray_crop_aug import corner_mask
@@ -1245,8 +1266,22 @@ class XrayPnoaramicInstance(XrayPnoramic):
         return coco_json
 
         
+    def _parse_item_coco_safe(self, index, max_retries=10):
+        """parse_item_coco wrapper that tolerates images listed in a coco json but
+        missing on disk (e.g. manually deleted). Logs a warning and retries with a
+        different random sample instead of crashing the whole training run."""
+        logger = get_logger()
+        for _ in range(max_retries):
+            try:
+                return self.parse_item_coco(index)
+            except (FileNotFoundError, OSError) as e:
+                logger.warning(f'[XrayPnoaramicInstance] skipping missing/unreadable image '
+                                f'(index={index}, file={self.file_name(index)}): {e}')
+                index = np.random.randint(0, len(self))
+        raise RuntimeError(f'failed to load a valid sample after {max_retries} retries')
+
     def __getitem__(self, index):
-        item = self.parse_item_coco(index)
+        item = self._parse_item_coco_safe(index)
         for key in ('segmentation', 'segmentation_orig', 'is_dummy'):
             item[1].pop(key, None)
         # img, target = torch_utils.data_convert(item, device='cpu')
