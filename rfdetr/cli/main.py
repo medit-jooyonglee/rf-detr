@@ -15,6 +15,18 @@ import torch
 import os
 import json
 
+
+def resolve_resume_checkpoint(output_dir):
+    """--resume용 자동 탐색. 우선순위: checkpoint_best_total.pth > checkpoint_best_ema.pth >
+    checkpoint_best_regular.pth > checkpoint.pth(최신). 하나도 없으면 None."""
+    for name in ['checkpoint_best_total.pth', 'checkpoint_best_ema.pth',
+                 'checkpoint_best_regular.pth', 'checkpoint.pth']:
+        path = os.path.join(output_dir, name)
+        if os.path.exists(path):
+            return path
+    return None
+
+
 def download_dataset(rf_project: roboflow.Project, dataset_version: int):
     versions = rf_project.versions()
     if dataset_version is not None:
@@ -169,6 +181,12 @@ def get_my_arg_parse():
                         help='DINOv2 backbone 학습률 (코드 기본값 1.5e-4, head lr보다 큼). '
                              '작은 데이터셋으로 freeze_encoder=False 전체 파인튜닝 시 catastrophic forgetting 방지하려면 '
                              'head lr보다 훨씬 낮게(예: 1e-5) 줄 것')
+    parser.add_argument('--resume', action=argparse.BooleanOptionalAction, default=True,
+                        help='--output_dir에 이미 저장된 체크포인트가 있으면 이어서 학습 (기본 True, --no-resume으로 끔). '
+                             '우선순위: checkpoint_best_total.pth(완료된 이전 run) > checkpoint_best_ema.pth > '
+                             'checkpoint_best_regular.pth > checkpoint.pth(최신, optimizer/epoch 상태 보존). '
+                             '아무 체크포인트도 없으면 에러 없이 처음부터 새로 학습 (info 로그만 출력). '
+                             '--eval일 때는 무시됨(평가는 --pretrain_weights로 지정한 모델만 사용).')
 
     # parser.add_argument('--pretrain_weights', type=str,
     #                     # default=True, 
@@ -404,9 +422,16 @@ def train_from_xray_teeth_dir():
         
     )
     device_supports_cuda = torch.cuda.is_available()
-    
+
+    resume_path = resolve_resume_checkpoint(args.output_dir) if (args.resume and not args.eval) else None
+    if args.resume and not args.eval and resume_path is None:
+        print(f'[info] --resume enabled but no checkpoint found under {args.output_dir}; starting fresh.')
+    elif resume_path is not None:
+        print(f'[info] --resume: continuing from {resume_path}')
+
     rf_detr.train(
         dataset_dir=dataset_dir,
+        resume=resume_path,
         coco_directories=coco_directories,
         coco_directories_val=coco_directories_val,
         epochs=args.epochs,

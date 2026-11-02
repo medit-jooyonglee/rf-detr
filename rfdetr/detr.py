@@ -7,6 +7,7 @@
 
 import json
 import os
+import yaml
 from collections import defaultdict
 from logging import getLogger
 from typing import Union, List
@@ -124,6 +125,26 @@ class RFDETR:
         """
         self.model.export(**kwargs)
 
+    @staticmethod
+    def _save_run_configs(output_dir, model_config: dict, train_config: dict):
+        """Dump the resolved model/train config to <output_dir>/config/*.yaml so a run
+        can be reproduced later without relying on the shell history that launched it."""
+        def to_yaml_safe(obj):
+            if isinstance(obj, dict):
+                return {k: to_yaml_safe(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [to_yaml_safe(v) for v in obj]
+            if obj is None or isinstance(obj, (str, int, float, bool)):
+                return obj
+            return str(obj)
+
+        config_dir = os.path.join(output_dir, "config")
+        os.makedirs(config_dir, exist_ok=True)
+        for name, data in (("model_config.yaml", model_config), ("train_config.yaml", train_config)):
+            with open(os.path.join(config_dir, name), "w") as f:
+                yaml.safe_dump(to_yaml_safe(data), f, sort_keys=False, allow_unicode=True)
+        logger.info(f"saved model/train config for reproducibility to {config_dir}")
+
     def train_from_config(self, config: TrainConfig, **kwargs):
         if config.dataset_file == "roboflow":
             with open(
@@ -153,6 +174,7 @@ class RFDETR:
         
         train_config = config.dict()
         model_config = self.model_config.dict()
+        self._save_run_configs(config.output_dir, model_config, train_config)
         model_config.pop("num_classes")
         if "class_names" in model_config:
             model_config.pop("class_names")
