@@ -308,6 +308,21 @@ def write_overlap_report(tooth_rows, pair_rows, save_dir, image_count):
     return report_path
 
 
+def load_export_model(model_path, device='cuda', export_shape=EXPORT_FIX_SIZE):
+    """export_libtorch로 저장한 libtorch 모델과 고정 입력 크기 (H, W)를 반환.
+    입력 크기는 같은 폴더의 *_info.json(export 시 저장)을 우선하고, 없으면 export_shape."""
+    import json
+    model = torch.jit.load(model_path, map_location=device)
+    model.eval()
+    info_path = os.path.splitext(model_path)[0] + '_info.json'
+    if os.path.isfile(info_path):
+        with open(info_path, encoding='utf-8') as f:
+            export_shape = json.load(f)['input_shape_nchw'][-2:]
+    else:
+        print(f'[warning] {info_path} not found; using export shape {tuple(export_shape)}')
+    return model, tuple(int(v) for v in export_shape)
+
+
 def main(*,
          use_ema=True, with_source_concat=False,
          test_path='',
@@ -321,7 +336,10 @@ def main(*,
          input_width=640,
          segmentation_crop_size=(128, 64),
          pretrain_weights='outputs/pretrained/segmentation/xray_teeth_seg/bounding_bbox_regularization/checkpoint.pth',
+         used_export=False,
+         export_shape=EXPORT_FIX_SIZE,
          **kwargs):
+    """used_export: pretrain_weights를 export된 libtorch(.pt) 모델로 보고 추론 (고정 입력 크기 letterbox)."""
     # FIXME: save_path
     from trainer import diskmanager, image_utils
     # save_dir = f'results/test/0828'
@@ -334,9 +352,18 @@ def main(*,
         if overlap_report is None:
             overlap_report = False
     assert drawing_mode in ['mask', 'polygon'], "Invalid drawing mode specified."
-    model = init_and_get_model(export=False, use_ema=use_ema,
-                                segmentation_crop_size=tuple(segmentation_crop_size),
-                                pretrain_weights=pretrain_weights)
+    export_resize_hw = None
+    if used_export:
+        model, export_resize_hw = load_export_model(pretrain_weights, export_shape=export_shape)
+        model_parameter = next(model.parameters())
+        convert_options = {'device': model_parameter.device, 'dtype': model_parameter.dtype}
+        print(f'Loaded exported libtorch model: {pretrain_weights} '
+              f'(input {export_resize_hw}, {model_parameter.dtype})')
+    else:
+        model = init_and_get_model(export=False, use_ema=use_ema,
+                                    segmentation_crop_size=tuple(segmentation_crop_size),
+                                    pretrain_weights=pretrain_weights)
+        convert_options = {}
     if overlap_report is None:
         overlap_report = drawing_mode == 'polygon'
     all_tooth_rows, all_pair_rows = [], []
@@ -375,13 +402,17 @@ def main(*,
             break
         # img = cv2.imread(file, cv2.IMREAD_GRAYSCALE)
         img = image_utils.cv2_imread(file, flags=cv2.IMREAD_GRAYSCALE)
-        rsz_img, input_content_box = resize_image(img, stride=64, target_width=input_width)
+        rsz_img, input_content_box = resize_image(img, stride=64, target_width=input_width,
+                                                  resize_hw=export_resize_hw)
         img2 = np.repeat(rsz_img[None], 3, axis=0) / 255.
 
-        img_tensor = torch_utils.data_convert(img2[None])
-        
+        img_tensor = torch_utils.data_convert(img2[None], **convert_options)
+
         with torch.no_grad():
             outputs = model(img_tensor)
+            if not isinstance(outputs, dict):
+                # export 모델은 (pred_boxes, pred_logits, pred_masks) tuple을 반환
+                outputs = dict(zip(('pred_boxes', 'pred_logits', 'pred_masks'), outputs))
             # print(outputs.keys())
             print(outputs['pred_logits'].shape, outputs['pred_boxes'].shape)
             if 'pred_masks' in outputs:
@@ -509,8 +540,8 @@ def init_and_get_model(config=None, device='cuda', export=False, use_ema=True,
             ema_state_dict = checkpoint.get('ema_model')
             if ema_state_dict is None:
                 print(
-                    f"EMA weights not found in {checkpoint_path}; "
-                    "using regular model weights."
+                    f"[warning] EMA weights (ema_model) not found in {checkpoint_path}; "
+                    "continuing with regular model weights."
                 )
             else:
                 rf_detr.model.model.load_state_dict(
@@ -578,8 +609,12 @@ def init_and_get_model(config=None, device='cuda', export=False, use_ema=True,
 
     
     # model.to()
-def export_libtorch(output_path='e:/temp/model_libtorch.pt', shape=(384, 704), dtype=torch.float16):
-    model = init_and_get_model(export=True)
+def export_libtorch(output_path='e:/temp/model_libtorch.pt', shape=(384, 704), dtype=torch.float16,
+                    pretrain_weights='outputs/pretrained/segmentation/xray_teeth_seg/bounding_bbox_regularization/checkpoint.pth',
+                    use_ema=True, segmentation_crop_size=(128, 64)):
+    model = init_and_get_model(export=True, use_ema=use_ema,
+                               segmentation_crop_size=tuple(segmentation_crop_size),
+                               pretrain_weights=pretrain_weights)
     model.eval()
     model.requires_grad_(False)
     # dtype = torch.float16
@@ -594,8 +629,24 @@ def export_libtorch(output_path='e:/temp/model_libtorch.pt', shape=(384, 704), d
     with torch.no_grad():
         traced = torch.jit.trace(model, dummy, check_trace=False)
 
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     traced.save(output_path)
     print(f'saved libtorch model to {output_path}')
+    # 배포 쪽에서 입력 크기/정밀도/원본 checkpoint를 확인할 수 있도록 같이 저장
+    import json
+    checkpoint_keys = torch.load(pretrain_weights, map_location='cpu', weights_only=False).keys()
+    info_path = os.path.splitext(output_path)[0] + '_info.json'
+    with open(info_path, 'w', encoding='utf-8') as f:
+        json.dump({
+            'pretrain_weights': os.path.abspath(pretrain_weights),
+            # init_and_get_model과 동일 규칙: ema_model 키가 없으면 regular(model) 가중치
+            'weights': 'ema_model' if use_ema and 'ema_model' in checkpoint_keys else 'model',
+            'input_shape_nchw': [1, 3, *shape],
+            'dtype': str(dtype).replace('torch.', ''),
+            'segmentation_crop_size': list(segmentation_crop_size),
+            'outputs': ['pred_boxes', 'pred_logits', 'pred_masks'],
+        }, f, indent=2)
+    print(f'saved export info to {info_path}')
     
     
 def coreml_export_main():
@@ -694,7 +745,9 @@ def test_coreml_inference():
 def inference_libtorch_model_main():
     from rfdetr.datasets.xraypanoramic import get_size
     # libtorch = 'outputs/temp.pt'
-    libtorch ='outputs/temp.pt'
+    # libtorch ='outputs/temp.pt'
+    libtorch = 'outputs/export/v1022_overlapfix/model_libtorch.pt'
+    
     
     model = torch.jit.load(libtorch)
     model.cuda()
@@ -795,12 +848,51 @@ def predict_wrapper(img, model=None, drawing_mode='mask',
 
 
 if __name__ == '__main__':
+
+    # inference_libtorch_model_main()
+    
+    # exit(0)
     parser = argparse.ArgumentParser(description='RF-DETR tooth segmentation inference')
     parser.add_argument(
         '--use-ema',
         action=argparse.BooleanOptionalAction,
         default=True,
         help='Use ema_model weights from the checkpoint (default: enabled).',
+    )
+    
+    parser.add_argument(
+        '--export',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='추론 대신 libtorch(torch.jit.trace) 모델로 export. '
+             '--pretrain-weights checkpoint를 {save_dir}/{version}/model_libtorch.pt 로 저장.',
+    )
+    parser.add_argument(
+        '--version',
+        type=str,
+        default=None,
+        help='export 저장 하위 폴더명 (--export 시 필수). 저장 경로: {save_dir}/{version}/',
+    )
+    parser.add_argument(
+        '--export-shape', '--export_shape',
+        dest='export_shape',
+        type=int, nargs=2, default=list(EXPORT_FIX_SIZE), metavar=('H', 'W'),
+        help=f'export 고정 입력 크기 (H W, 기본 {EXPORT_FIX_SIZE[0]} {EXPORT_FIX_SIZE[1]}). '
+             'predict_wrapper가 jit 모델에 쓰는 EXPORT_FIX_SIZE와 같아야 한다.',
+    )
+    parser.add_argument(
+        '--used-export', '--used_export',
+        dest='used_export',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='--pretrain-weights를 export된 libtorch 모델(model_libtorch.pt)로 보고 추론. '
+             '입력 크기는 *_info.json(없으면 --export-shape), 정밀도는 모델 dtype을 따른다.',
+    )
+    parser.add_argument(
+        '--export-dtype', '--export_dtype',
+        dest='export_dtype',
+        type=str, default='float16', choices=['float16', 'float32'],
+        help='export 모델 정밀도 (기본 float16).',
     )
     parser.add_argument(
         '--with-source-concat',
@@ -895,9 +987,21 @@ if __name__ == '__main__':
         help='추론에 사용할 checkpoint 경로.',
     )
     cli_args = parser.parse_args()
-    main(
-        **vars(cli_args),
-    )
+    if cli_args.export:
+        if not cli_args.version:
+            parser.error('--export requires --version (output: {save_dir}/{version}/)')
+        export_libtorch(
+            os.path.join(cli_args.save_dir, cli_args.version, 'model_libtorch.pt'),
+            shape=tuple(cli_args.export_shape),
+            dtype=getattr(torch, cli_args.export_dtype),
+            pretrain_weights=cli_args.pretrain_weights,
+            use_ema=cli_args.use_ema,
+            segmentation_crop_size=cli_args.segmentation_crop_size,
+        )
+    else:
+        main(
+            **vars(cli_args),
+        )
     # 
     # main(use_ema=cli_args.use_ema,
         #  with_source_concat=cli_args.with_source_concat, **)

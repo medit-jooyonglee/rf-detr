@@ -411,88 +411,11 @@ python -m rfdetr.cli.main \
   
 ~~~
 
-nohup python rfdetr/cli/main.py \
-  --data_mode natural \
-  --xray_crop_mode teeth_roi --xray_crop_prob 1.0 \
-  --eval_xray_crop \
-  --input_width 256 \
-  --pretrain_weights outputs/natural_teeth_roi/checkpoint_best_regular.pth \
-  --segmentation_crop_size 64 48 \
-  --epochs 400 \
-  --checkpoint_interval 100 \
-  --batch_size 1 \
-  --device cuda:5 \
-  --eval --eval_save \
-  --output_dir outputs/natural_teeth_roi  > logs/natural_teeth_roi.log 2>&1 &
 
-
-
-nohup python rfdetr/cli/main.py \
-  --data_mode xray \
-  --pretrain_weights outputs/pretrained/segmentation/xray_teeth_seg/panoramic_overlapfix/checkpoint_best_total.pth \
-  --xray_crop_mode periapical teeth_roi \
-  --xray_crop_prob 0.4 0.4 \
-  --input_width 640 \
-  --segmentation_crop_size 128 64 \
-  --epochs 30 \
-  --checkpoint_interval 10 \
-  --batch_size 4 \
-  --device cuda:5 \
-  --output_dir outputs/prei_dataset_fusion \
-  > logs/peri_dataset_fusion.log 2>&1 &
-
-
-nohup python -m rfdetr.cli.main \
-  --pretrain_weights outputs/peri_data_fusion/checkpoint_best_ema.pth \
-  --device cuda:4 \
-  --batch_size 4 \
-  --epochs 500 \
-  --checkpoint_interval 50 \
-  --xray_crop_mode periapical teeth_roi \
-  --xray_crop_prob 0.2 0.4 \
-  --overlap_loss_coef 4.0 \
-  --lr_encoder 1e-5 \
-  --output_dir outputs/peri_data_fusion \
-  > logs/peri_data_fusion_resume.log 2>&1 &
-
-  nohup /opt/conda/bin/python -m rfdetr.cli.main \
-  --pretrain_weights outputs/natural_teeth_roi_crop48/checkpoint_best_total.pth \
-  --data_mode natural \
-  --xray_crop_mode teeth_roi \
-  --xray_crop_prob .8 \
-  --eval_xray_crop \
-  --input_width 384 \
-  --segmentation_crop_size 48 48 \
-  --epochs 400 \
-  --checkpoint_interval 100 \
-  --batch_size 1 \
-  --device cuda:5 \
-  --output_dir outputs/natural_teeth_roi_crop48 \
-  > logs/natural_teeth_roi_crop48.log 2>&1 &
-
-
-  nohup /opt/conda/bin/python -m rfdetr.cli.main \
-  --pretrain_weights outputs/natural_teeth_roi_crop48/checkpoint_best_total.pth \
-  --data_mode natural \
-  --xray_crop_mode teeth_roi \
-  --xray_crop_prob 1.0 \
-  --device cuda:4 \
-  --eval_xray_crop \
-  --input_width 384 \
-  --segmentation_crop_size 48 48 \
-  --epochs 400 \
-  --eval --eval_save \
-  --checkpoint_interval 100 \
-  --batch_size 1 \
-  --device cuda:1 \
-  --output_dir outputs/natural_teeth_roi_crop48 \
-  > logs/natural_teeth_roi_crop48.log 2>&1 &
-
-
-
-
-  ## 배포 테스트 버전
-   * reverse tomo 버전 모델 
-
-     * outputs/fine_tune_own1022_v2_overlapfix
-     * 
+$env:PYTHONPATH = "."
+python rfdetr/deploy/predict_teeth.py --face-crop `
+  --test-path E:/dataset/smile_design/flux2/faces `
+  --save-dir E:/dataset/smile_design/flux2/faces `
+  --pretrain_weights outputs/teeth/checkpoint_best_ema.pth `
+  --input_width 256 --segmentation_crop_size 64 48 `
+  --convert labelme

@@ -303,12 +303,13 @@ def write_overlap_report(tooth_rows, pair_rows, save_dir, image_count):
         )
     report_path = os.path.join(save_dir, 'overlap_report.md')
     with open(report_path, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(lines) + '\n')
+        f.write('/n'.join(lines) + '\n')
     print(f'Saved overlap report to: {report_path}')
     return report_path
 
 
 DEFAULT_FACE_MODEL = 'thirds/face_detector/models/face_landmarker.task'
+MIN_FACE_ROI_PX = 8  # clip 후 teeth ROI 최소 변 길이 (이보다 작으면 입이 화면 밖으로 판단)
 
 
 def load_face_cropper(face_model=DEFAULT_FACE_MODEL):
@@ -358,6 +359,12 @@ def render_instances(image_rgb, instance_result, roi_box=None, thickness=None):
     return image
 
 
+def mask_output_path(savename):
+    """label mask 저장 경로. 원본이 png면 렌더 이미지와 이름이 겹치므로 _mask 접미사."""
+    stem, ext = os.path.splitext(savename)
+    return f'{stem}_mask.png' if ext.lower() == '.png' else f'{stem}.png'
+
+
 def main(*,
          use_ema=True, with_source_concat=False,
          test_path='',
@@ -374,6 +381,9 @@ def main(*,
          face_crop=False,
          face_model=DEFAULT_FACE_MODEL,
          face_crop_margin=0.08,
+         face_crop_force=False,
+         overwrite=False,
+         save_crop=False,
          **kwargs):
     """face_crop: 얼굴 사진 -> MediaPipe 입 랜드마크로 teeth ROI crop -> RGB 추론 -> 원본 좌표 복원.
     natural 학습 데이터는 RGB 컬러(CocoDetection)로 읽으므로 face_crop 경로는 컬러 입력을 쓴다.
@@ -430,16 +440,35 @@ def main(*,
             # break
         if max_images is not None and idx >= max_images:
             break
+        if not overwrite:
+            json_path = os.path.splitext(os.path.join(mask_save_dir, os.path.relpath(file, path)))[0] + '.json'
+            if os.path.isfile(json_path):
+                print(f'[skip] json exists (use --overwrite to redo): {file}')
+                continue
         # img = cv2.imread(file, cv2.IMREAD_GRAYSCALE)
         roi_box = None
         if cropper is not None:
             img = image_utils.cv2_imread(file, flags=cv2.IMREAD_COLOR)
             try:
                 landmarks, _ = cropper.detect_landmarks(img)
+                if cropper.last_detection_used_fallback:
+                    # 입 주변 클로즈업 등 얼굴이 잘려 신뢰도가 낮은 경우. 입술 랜드마크로 동일하게 진행
+                    print(f'[face-crop][warning] low-confidence face (cropped face, fallback detection): {file}')
+                roi_box = cropper.teeth_roi_box(landmarks, img.shape[:2], margin=face_crop_margin)
+                # 얼굴은 찾았지만 입이 화면 밖인 경우(눈/코 클로즈업 등): 추정된 입 랜드마크가
+                # 이미지 밖이라 경계로 clip하면 ROI가 비거나 너무 얇아진다 -> 검출 실패와 동일 처리
+                if min(roi_box[2] - roi_box[0], roi_box[3] - roi_box[1]) < MIN_FACE_ROI_PX:
+                    raise ValueError(f'mouth ROI outside image (clipped roi={roi_box})')
             except ValueError as e:
-                print(f'[face-crop] skip {file}: {e}')
-                continue
-            roi_box = cropper.teeth_roi_box(landmarks, img.shape[:2], margin=face_crop_margin)
+                if not face_crop_force:
+                    print(f'[face-crop] skip {file}: {e}')
+                    continue
+                # 구강 내 사진/입 클로즈업처럼 얼굴이 없는 경우: 이미지 전체를 teeth ROI로 보고 강제 추론
+                print(
+                    f'[face-crop][warning] {e}; '
+                    f'--face-crop-fallback-full-image -> full image as ROI: {file}'
+                )
+                roi_box = (0, 0, img.shape[1], img.shape[0])
             x0, y0, x1, y1 = roi_box
             model_input = cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2RGB)
             print(f'[face-crop] {os.path.basename(file)} roi={roi_box} crop_hw={model_input.shape[:2]}')
@@ -483,8 +512,9 @@ def main(*,
                 from trainer import image_utils
                 stem, ext = os.path.splitext(savename)
                 if roi_box is not None:
-                    # crop 결과 -> 원본 좌표 복원. crop 단독 렌더는 디버깅용으로 따로 저장
-                    image_utils.cv2_imwrite(f'{stem}_crop.png', color_image[0].astype(np.uint8)[..., ::-1])
+                    # crop 결과 -> 원본 좌표 복원. crop 단독 렌더는 --save-crop일 때만 디버깅용으로 저장
+                    if save_crop:
+                        image_utils.cv2_imwrite(f'{stem}_crop.png', color_image[0].astype(np.uint8)[..., ::-1])
                     instance_results[0] = restore_instance_result(instance_results[0], roi_box, img.shape[:2])
                     color_image = [render_instances(
                         cv2.cvtColor(img, cv2.COLOR_BGR2RGB), instance_results[0], roi_box, polygon_thickness)]
@@ -506,8 +536,7 @@ def main(*,
                     )
                     print(f"Saved Labelme annotation to: {labelme_path}")
                 else:
-                    # 원본이 png면 렌더 이미지와 이름이 겹치므로 _mask 접미사
-                    mask_path = f'{stem}_mask.png' if ext.lower() == '.png' else f'{stem}.png'
+                    mask_path = mask_output_path(savename)
                     image_utils.cv2_imwrite(mask_path, mask_iamge[0].astype(np.uint8))
                     image_utils.cv2_imwrite(savename, color_image[0].astype(np.uint8)[..., ::-1])  # Convert RGB to BGR for saving with OpenCV
                     print(f"Saved mask image to: {mask_path}")
@@ -877,15 +906,18 @@ def predict_wrapper(img, model=None, drawing_mode='mask',
 
 
 """
+
+  --input_width 384 \
+  --segmentation_crop_size 48 48 \
     
 # teeth-학습 환경..?    
 nohup python rfdetr/cli/main.py \
   --data_mode natural \
   --xray_crop_mode teeth_roi --xray_crop_prob 1.0 \
   --eval_xray_crop \
-  --input_width 256 \
+  --input_width 384 \
   --pretrain_weights outputs/natural_teeth_roi/checkpoint_best_regular.pth \
-  --segmentation_crop_size 64 48 \
+  --segmentation_crop_size 48 48 \
   --epochs 400 \
   --checkpoint_interval 100 \
   --batch_size 1 \
@@ -906,6 +938,19 @@ nohup python rfdetr/cli/main.py \
 crop_size
 48, 48 이면 충분
 
+$env:PYTHONPATH = "."
+python rfdetr/deploy/predict_teeth.py --face-crop `
+  --test-path E:/dataset/smile_design/unsplash/unsplash_originals_resize `
+  --save-dir E:/dataset/smile_design/unsplash/unsplash_originals_resize `
+  --pretrain_weights outputs/natural_teeth_roi_crop48\checkpoint_best_total.pth `
+  --input_width 384 --segmentation_crop_size 48 48 `
+  --convert labelme --face-crop-force
+
+
+
+
+
+# E:\dataset\smile_design\flux2\faces
 
 """
 
@@ -981,10 +1026,10 @@ if __name__ == '__main__':
         '--polygon-epsilon', '--polygon_epsilon',
         dest='polygon_epsilon',
         type=float,
-        default=2.0,
+        default=1.0,
         help=(
             'RDP polygon simplification error in pixels for Labelme output. '
-            '0 disables simplification (default: 2.0).'
+            '0 disables simplification (default: 1.0).'
         ),
     )
     parser.add_argument(
@@ -1006,7 +1051,7 @@ if __name__ == '__main__':
         '--pretrain-weights', '--pretrain_weights',
         dest='pretrain_weights',
         type=str,
-        default='outputs/pretrained/segmentation/xray_teeth_seg/bounding_bbox_regularization/checkpoint.pth',
+        default='outputs/natural_teeth_roi_crop48/checkpoint_best_total.pth',
         help='추론에 사용할 checkpoint 경로.',
     )
     parser.add_argument(
@@ -1030,6 +1075,33 @@ if __name__ == '__main__':
         default=0.08,
         help='inner-lip bbox 대비 각 변 margin (학습 teeth_roi eval_margin=0.08과 동일 기본값).',
     )
+    parser.add_argument(
+        '--face-crop-fallback-full-image', '--face_crop_fallback_full_image',
+        '--face-crop-force', '--face_crop_force',
+        dest='face_crop_force',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            '얼굴 검출 실패 시(구강 내 사진, 입 클로즈업 등) skip하지 않고 '
+            '원본 이미지 전체를 RGB로 resize해 추론한다. '
+            '--face-crop-force는 호환용 alias.'
+        ),
+    )
+    parser.add_argument(
+        '--overwrite',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='true: 모든 이미지를 다시 추론해 덮어쓴다. '
+             'false(기본): save-dir에 결과 json이 이미 있으면 건너뛰고 '
+             'json이 없는 이미지(실패 케이스)만 추론한다.',
+    )
+    parser.add_argument(
+        '--save-crop', '--save_crop',
+        dest='save_crop',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='--face-crop 시 crop 영역 추론 렌더를 {stem}_crop.png로 저장 (디버깅용, 기본 off).',
+    )
     cli_args = parser.parse_args()
     main(
         **vars(cli_args),
@@ -1041,4 +1113,25 @@ if __name__ == '__main__':
     # coreml_export_main()
     # test_coreml_inference()
     # inference_libtorch_model_main()
+
+"""
+
+windows
+conda activate filterseg
+python -m rfdetr.deploy.predict_teeth `
+  --test-path r"E:/dataset/smile_design/pixabay/samples_2611" `
+  --save-dir r"E:/dataset/smile_design/pixabay/samples_2611" `
+  --pretrain-weights "./outputs/natural_teeth_roi_crop48/checkpoint_best_total.pth" `
+  --input-width 384 `
+  --segmentation-crop-size 48 48 `
+  --face-crop `
+  --face-crop-fallback-full-image `
+  --face-crop-margin 0.08 `
+  --convert labelme `
+  --no-use-ema `
+  --overwrite
+
+
+
+"""
 

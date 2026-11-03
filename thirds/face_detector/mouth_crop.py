@@ -84,7 +84,17 @@ class MouthCropper:
         vertical_margin: float = 1.0,
         min_detection_confidence: float = 0.5,
         min_presence_confidence: float = 0.5,
+        fallback_padding: float | tuple[float, ...] | None = (0.5, 1.0, 1.5, 2.0),
+        fallback_confidence: float = 0.1,
+        fallback_min_mouth_width: float = 0.15,
     ) -> None:
+        """``fallback_padding``: when no face is found (e.g. a mouth close-up without eyes),
+        retry on an image padded by each of these fractions of its long side per edge, in
+        order, with ``fallback_confidence`` thresholds. The padding shrinks the face so the
+        face detector sees it whole. ``None`` disables the retry.
+        ``fallback_min_mouth_width``: a fallback hit is accepted only if the inner-lip width
+        is at least this fraction of the image width. A face that needed the retry is a
+        close-up, so a tiny mouth means a spurious hit (e.g. intraoral photos)."""
         if output_size[0] <= 0 or output_size[1] <= 0:
             raise ValueError("output_size dimensions must be positive")
         if horizontal_margin < 0 or vertical_margin < 0:
@@ -102,21 +112,38 @@ class MouthCropper:
         self.output_size = output_size
         self.horizontal_margin = horizontal_margin
         self.vertical_margin = vertical_margin
-        options = vision.FaceLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path=str(Path(model_path).resolve())),
-            running_mode=vision.RunningMode.IMAGE,
-            num_faces=1,
-            min_face_detection_confidence=min_detection_confidence,
-            min_face_presence_confidence=min_presence_confidence,
-            output_face_blendshapes=False,
-            output_facial_transformation_matrixes=False,
+        if isinstance(fallback_padding, (int, float)):
+            fallback_padding = (float(fallback_padding),)
+        self.fallback_padding = fallback_padding
+        self.fallback_min_mouth_width = fallback_min_mouth_width
+        # 직전 detect_landmarks()가 저신뢰 fallback(padding 재시도)으로 얼굴을 찾았는지
+        self.last_detection_used_fallback = False
+
+        def create_landmarker(detection_confidence: float, presence_confidence: float):
+            options = vision.FaceLandmarkerOptions(
+                base_options=BaseOptions(model_asset_path=str(Path(model_path).resolve())),
+                running_mode=vision.RunningMode.IMAGE,
+                num_faces=1,
+                min_face_detection_confidence=detection_confidence,
+                min_face_presence_confidence=presence_confidence,
+                output_face_blendshapes=False,
+                output_facial_transformation_matrixes=False,
+            )
+            return vision.FaceLandmarker.create_from_options(options)
+
+        self._landmarker = create_landmarker(min_detection_confidence, min_presence_confidence)
+        self._fallback_landmarker = (
+            create_landmarker(fallback_confidence, fallback_confidence)
+            if fallback_padding is not None
+            else None
         )
-        self._landmarker = vision.FaceLandmarker.create_from_options(options)
 
     def close(self) -> None:
-        if self._landmarker is not None:
-            self._landmarker.close()
-            self._landmarker = None
+        for name in ("_landmarker", "_fallback_landmarker"):
+            landmarker = getattr(self, name, None)
+            if landmarker is not None:
+                landmarker.close()
+                setattr(self, name, None)
 
     def __enter__(self) -> "MouthCropper":
         return self
@@ -164,15 +191,38 @@ class MouthCropper:
         result = self._landmarker.detect(
             self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
         )
-        if not result.face_landmarks:
-            raise ValueError("MediaPipe did not detect a face")
-
         source_height, source_width = image_bgr.shape[:2]
-        points = np.asarray(
-            [(point.x * source_width, point.y * source_height) for point in result.face_landmarks[0]],
-            dtype=np.float32,
-        )
-        return points, len(result.face_landmarks)
+
+        def to_points(landmarks, pad):
+            canvas_width, canvas_height = source_width + 2 * pad, source_height + 2 * pad
+            return np.asarray(
+                [(point.x * canvas_width - pad, point.y * canvas_height - pad) for point in landmarks],
+                dtype=np.float32,
+            )
+
+        self.last_detection_used_fallback = False
+        if result.face_landmarks:
+            return to_points(result.face_landmarks[0], 0), len(result.face_landmarks)
+        if self._fallback_landmarker is not None:
+            self.last_detection_used_fallback = True
+            # 입 주변 클로즈업처럼 눈이 잘린 얼굴은 face detector가 놓친다.
+            # 테두리를 채워 얼굴을 작게 만들고 낮은 confidence로 padding을 키워가며 재시도.
+            for padding in self.fallback_padding:
+                pad = int(round(max(rgb.shape[:2]) * padding))
+                padded = np.ascontiguousarray(
+                    cv2.copyMakeBorder(rgb, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
+                )
+                result = self._fallback_landmarker.detect(
+                    self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=padded)
+                )
+                if not result.face_landmarks:
+                    continue
+                points = to_points(result.face_landmarks[0], pad)
+                inner = points[np.asarray(INNER_MOUTH_POLYGON)]
+                if np.ptp(inner[:, 0]) < self.fallback_min_mouth_width * source_width:
+                    continue  # 구강 내 사진 등에서 엉뚱한 곳에 잡힌 작은 입
+                return points, len(result.face_landmarks)
+        raise ValueError("MediaPipe did not detect a face")
 
     @staticmethod
     def teeth_roi_box(

@@ -11,7 +11,8 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "args": [
-                // "--eval"
+                "--eval",
+                "--eval_save"
 
             ]
         },
