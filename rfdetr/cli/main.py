@@ -14,6 +14,7 @@ from rfdetr import RFDETRBase, RFDETRNano, RFDETRSmall
 import torch
 import os
 import json
+import yaml
 
 
 def resolve_resume_checkpoint(output_dir):
@@ -25,6 +26,26 @@ def resolve_resume_checkpoint(output_dir):
         if os.path.exists(path):
             return path
     return None
+
+
+def save_argparse_config(args, resolved=None):
+    """cli/main.py의 전체 argparse 값(Namespace)을 <output_dir>/config/argparse_config.yaml에 저장한다.
+    rfdetr.detr.RFDETR._save_run_configs()가 저장하는 model_config.yaml/train_config.yaml은 TrainConfig/
+    ModelConfig pydantic 필드만 담아서, xray_crop_mode/xray_crop_prob/data_mode/contrast_aug 등 cli 전용
+    인자는 빠진다 -- 나중에 shell history 없이 '이 run을 어떤 커맨드로 돌렸는지' 재현하려면 이 파일을 봐야 한다.
+
+    resolved: coco_directories(_val)처럼 data_mode에 따라 cli/main.py 코드 안에서 하드코딩으로 정해지는
+    값이나, contrast_aug처럼 '미지정 시 자동 결정'되는 값 등 -- args만 봐서는 알 수 없는, 실제로 적용된
+    값들. 이것들이 빠지면 나중에 코드(예: 1022 -> 1104 경로 변경)가 바뀐 뒤에는 과거 run이 정확히 어떤
+    데이터/설정으로 돌았는지 argparse_config.yaml만으로는 복원이 안 된다."""
+    from rfdetr.util.misc import get_sha
+    config_dir = os.path.join(args.output_dir, 'config')
+    os.makedirs(config_dir, exist_ok=True)
+    path = os.path.join(config_dir, 'argparse_config.yaml')
+    payload = dict(args=vars(args), resolved=resolved or {}, git=get_sha())
+    with open(path, 'w') as f:
+        yaml.safe_dump(payload, f, sort_keys=False, allow_unicode=True)
+    print(f'[info] saved argparse config to {path}')
 
 
 def download_dataset(rf_project: roboflow.Project, dataset_version: int):
@@ -162,6 +183,15 @@ def get_my_arg_parse():
                         help='검증 crop 시드 (이미지별 고정, 기본 42)')
     parser.add_argument('--save_crop_samples', type=int, default=0,
                         help='N>0: --xray_crop_mode의 mode별로 학습 샘플 N장을 outputs/xray_crop_samples/{mode}/ 에 저장하고 종료')
+    parser.add_argument('--contrast_aug', action=argparse.BooleanOptionalAction, default=None,
+                        help='학습 시 명암(contrast) augmentation 적용. 신규 저해상도 치근단(1104~) 데이터가 기존 '
+                             'pano/peri 데이터와 contrast 분포가 크게 달라 검출이 잘 안 되는 문제 완화용 -- '
+                             'CLAHE 강화판/밝기-대비 jitter/원본을 적당한 분포로 섞어서 학습시킨다. '
+                             '미지정 시 --data_mode xray면 기본 활성, natural(색상 사진)이면 기본 비활성. '
+                             '상세: rfdetr/datasets/xraypanoramic.py DEFAULT_CONTRAST_AUG_CFG')
+    parser.add_argument('--contrast_aug_cfg', type=str, default=None,
+                        help='contrast augmentation 세부 파라미터 JSON (xraypanoramic.DEFAULT_CONTRAST_AUG_CFG 덮어쓰기). '
+                             '예: \'{"clahe_prob": 0.4, "clahe_clip_limit": [1.5, 3.5], "brightness_contrast_prob": 0.25}\'')
     parser.add_argument('--build_tufts', action='store_true',
                         help='Tufts(kaggle_2222) teeth_polygon.pkl -> ann/*.json 변환(기존 ann 자동 백업) + 변환 점검 후 종료')
     parser.add_argument('--build_json', action='store_true',
@@ -245,10 +275,13 @@ def train_from_xray_teeth_dir():
                 
             ]
             coco_directories = [
-                    # ('E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm', 
+                    # ('E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm',
                     # 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm/annotations.json')
-                    ('/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1022/train/', 
-                    '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1022/train/annotations.json'),
+                    # 1104: 1022 대비 치근단(periapical) 방사선 데이터 추가. 신규 치근단 이미지는 파일명에
+                    # 'peri' 키워드가 없고 해상도가 작음(<=1000x1000) -- XrayPnoaramicInstance가 해상도 기준으로
+                    # 자동 식별해 crop augmentation 대상에서 제외한다 (rfdetr/datasets/xraypanoramic.py 참고).
+                    ('/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1104/train/',
+                    '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1104/train/annotations.json'),
                     (
                         '/data1/jooyonglee/reverse_tomo/xray_panoramic/seoul_univ_inspect_COCO/train/',
                         '/data1/jooyonglee/reverse_tomo/xray_panoramic/seoul_univ_inspect_COCO/train/annotations.json',
@@ -256,8 +289,8 @@ def train_from_xray_teeth_dir():
                 ]
             # ③ 자체 데이터 val split (평가 GT에 합쳐서 평가)
             coco_directories_val = [
-                    ('/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1022/val/',
-                    '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1022/val/annotations.json'),
+                    ('/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1104/valid/',
+                    '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1104/valid/annotations.json'),
                                         (
                         '/data1/jooyonglee/reverse_tomo/xray_panoramic/seoul_univ_inspect_COCO/val/',
                         '/data1/jooyonglee/reverse_tomo/xray_panoramic/seoul_univ_inspect_COCO/val/annotations.json',
@@ -339,6 +372,11 @@ def train_from_xray_teeth_dir():
         verify_xray_coco_json(annot_file_v2, base_dir=json_base_dirs[0],
                               vis_dir='outputs/xray_coco_json_vis', num_vis=20)
     xray_crop_cfg = json.loads(args.xray_crop_cfg) if args.xray_crop_cfg else None
+    # 미지정 시 xray 모드만 기본 활성 (natural은 색상 사진이라 그레이스케일 CLAHE 기반 augmentation 부적합).
+    # Windows 분기는 mode 변수가 없으므로(단일 ① 데이터셋) and의 short-circuit으로 안전하게 False가 된다.
+    contrast_aug = args.contrast_aug if args.contrast_aug is not None else (
+        platform.system().lower() == 'linux' and mode == 'xray')
+    contrast_aug_cfg = json.loads(args.contrast_aug_cfg) if args.contrast_aug_cfg else None
     if args.save_crop_samples > 0:
         assert args.xray_crop_mode, '--save_crop_samples needs --xray_crop_mode periapical|teeth_roi'
         from rfdetr.datasets.xray_crop_aug import save_crop_samples, split_crop_cfg
@@ -429,6 +467,8 @@ def train_from_xray_teeth_dir():
     elif resume_path is not None:
         print(f'[info] --resume: continuing from {resume_path}')
 
+    save_argparse_config(args)
+
     rf_detr.train(
         dataset_dir=dataset_dir,
         resume=resume_path,
@@ -480,6 +520,8 @@ def train_from_xray_teeth_dir():
         xray_crop_cfg=xray_crop_cfg,
         eval_xray_crop=args.eval_xray_crop,
         eval_xray_crop_seed=args.eval_xray_crop_seed,
+        contrast_aug=contrast_aug,
+        contrast_aug_cfg=contrast_aug_cfg,
         # **args.__dict__
         
         # dataset -config

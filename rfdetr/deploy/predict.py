@@ -22,7 +22,14 @@ from rfdetr.util.utils import clean_state_dict
 import rfdetr.datasets.transforms as T
 from rfdetr.models import build_model
 from rfdetr import RFDETRBase, RFDETRNano, RFDETRSmall
+from rfdetr.datasets.xraypanoramic import apply_clahe
 from trainer import torch_utils
+
+# 가볍고 빠른 CLAHE 기본값 (단일 cv2 CLAHE 호출). 학습 측 augmentation 범위(1.5~3.5)의 중간값 --
+# rfdetr/datasets/xraypanoramic.py DEFAULT_CONTRAST_AUG_CFG 참고. 배포 모델 호환성을 위해 기본은
+# 비활성(--clahe로 켜기): 기존 배포 체크포인트는 CLAHE 분포를 학습하지 않았으므로, 끄는 쪽이 안전한 기본값이다.
+DEFAULT_PREDICT_CLAHE_CLIP_LIMIT = 2.0
+DEFAULT_PREDICT_CLAHE_TILE_GRID = 8
 
 from rfdetr.config import (
     RFDETRLargeConfig,
@@ -336,6 +343,9 @@ def main(*,
          input_width=640,
          segmentation_crop_size=(128, 64),
          pretrain_weights='outputs/pretrained/segmentation/xray_teeth_seg/bounding_bbox_regularization/checkpoint.pth',
+         apply_clahe_enhance=False,
+         clahe_clip_limit=DEFAULT_PREDICT_CLAHE_CLIP_LIMIT,
+         clahe_tile_grid=DEFAULT_PREDICT_CLAHE_TILE_GRID,
          used_export=False,
          export_shape=EXPORT_FIX_SIZE,
          **kwargs):
@@ -402,6 +412,8 @@ def main(*,
             break
         # img = cv2.imread(file, cv2.IMREAD_GRAYSCALE)
         img = image_utils.cv2_imread(file, flags=cv2.IMREAD_GRAYSCALE)
+        if apply_clahe_enhance:
+            img = apply_clahe(img, clip_limit=clahe_clip_limit, tile_grid=clahe_tile_grid)
         rsz_img, input_content_box = resize_image(img, stride=64, target_width=input_width,
                                                   resize_hw=export_resize_hw)
         img2 = np.repeat(rsz_img[None], 3, axis=0) / 255.
@@ -479,11 +491,6 @@ def main(*,
                 print('draw_preditions_boxes failed')
     if overlap_report:
         write_overlap_report(all_tooth_rows, all_pair_rows, mask_save_dir, processed_count)
-    # model = build_model(args)
-    # checkpoint = torch.load(args.pretrain_weights, map_location='cpu', weights_only=False)
-    # res = model.load_state_dict(checkpoint['model'], strict=False)
-    
-    print(model)
     
 
 def init_and_get_model(config=None, device='cuda', export=False, use_ema=True,
@@ -780,7 +787,10 @@ def inference_libtorch_model_main():
 
 
 def predict_wrapper(img, model=None, drawing_mode='mask',
-                    return_instance_results=False):
+                    return_instance_results=False,
+                    apply_clahe_enhance=False,
+                    clahe_clip_limit=DEFAULT_PREDICT_CLAHE_CLIP_LIMIT,
+                    clahe_tile_grid=DEFAULT_PREDICT_CLAHE_TILE_GRID):
     """Run one image while preserving the legacy two-value return by default.
 
     When ``return_instance_results`` is true, a third value is returned with
@@ -788,12 +798,19 @@ def predict_wrapper(img, model=None, drawing_mode='mask',
     label image is composed.  This is the overlap-preserving input used by
     reverse registration; callers that only need ``(drawing, mask)`` are
     unaffected.
+
+    apply_clahe_enhance: optional lightweight CLAHE contrast enhancement before
+    inference (default off -- existing deployed checkpoints were not trained
+    with CLAHE'd inputs; see rfdetr/datasets/xraypanoramic.py DEFAULT_CONTRAST_AUG_CFG
+    for the matching training-time augmentation).
     """
     if model is None:
         model = init_and_get_model(export=False, use_ema=True)
     if img.ndim ==3:
         # simple gray image as pickking first channel
         img = img[..., 0]
+    if apply_clahe_enhance:
+        img = apply_clahe(img, clip_limit=clahe_clip_limit, tile_grid=clahe_tile_grid)
     if isinstance(model, torch.jit.ScriptModule):
         # export model
         rsz_img, input_content_box = resize_image(img, stride=64, resize_hw=EXPORT_FIX_SIZE)
@@ -917,7 +934,7 @@ if __name__ == '__main__':
         '--drawing-mode', '--drawing_mode',
         dest='drawing_mode',
         type=str,
-        default='mask',
+        default='polygon',
         choices=['mask', 'polygon'],
         help="mask: 병합 label map 채우기 (겹친 영역은 FDI 큰 치아로 덮임). "
              "polygon: 치아별 외곽선만 그려서 인접 치아 중첩 영역 확인.",
@@ -985,6 +1002,30 @@ if __name__ == '__main__':
         type=str,
         default='outputs/pretrained/segmentation/xray_teeth_seg/bounding_bbox_regularization/checkpoint.pth',
         help='추론에 사용할 checkpoint 경로.',
+    )
+    parser.add_argument(
+        '--clahe', '--apply-clahe', '--apply_clahe',
+        dest='apply_clahe_enhance',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='추론 전 가볍고 빠른 CLAHE 명암 강화 적용 (기본 비활성). 저해상도/고대비 치근단 방사선처럼 '
+             '기존 pano 데이터와 명암 분포가 많이 다른 입력에 도움이 될 수 있다 -- 단, 기존 배포 '
+             '체크포인트는 CLAHE 입력 분포를 학습하지 않았으므로 기본값은 꺼둔다 (배포 모델 호환성). '
+             'rfdetr/datasets/xraypanoramic.py의 contrast augmentation으로 재학습한 체크포인트에서만 켜서 쓸 것.',
+    )
+    parser.add_argument(
+        '--clahe-clip-limit', '--clahe_clip_limit',
+        dest='clahe_clip_limit',
+        type=float,
+        default=DEFAULT_PREDICT_CLAHE_CLIP_LIMIT,
+        help=f'--clahe 사용 시 CLAHE clipLimit (기본 {DEFAULT_PREDICT_CLAHE_CLIP_LIMIT}).',
+    )
+    parser.add_argument(
+        '--clahe-tile-grid', '--clahe_tile_grid',
+        dest='clahe_tile_grid',
+        type=int,
+        default=DEFAULT_PREDICT_CLAHE_TILE_GRID,
+        help=f'--clahe 사용 시 CLAHE tileGridSize (정사각형, 기본 {DEFAULT_PREDICT_CLAHE_TILE_GRID}).',
     )
     cli_args = parser.parse_args()
     if cli_args.export:

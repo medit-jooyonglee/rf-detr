@@ -64,8 +64,10 @@ class XrayPnoramic(Dataset):
         self.splits = splits.get(name, (0, 1))
         
         
-        # 리사이즈 기준 너비. 실제 입력 너비는 stride 올림으로 (input_width // 64 + 1) * 64 (640 -> 704)
-        self.target_width = input_width
+        # Backward-compatible name: input_width now means the maximum image
+        # side. The longer side is scaled to this value, then both axes are
+        # minimally padded to a stride multiple without changing aspect ratio.
+        self.target_size = input_width
         self.source_files = []
         self.gt_files = []
         self.deep_search_files(path_lists)
@@ -215,10 +217,12 @@ class XrayPnoramic(Dataset):
         
     def get_target_image_size(self, image_shape):
 
-        size =  get_target_image_size(image_shape, self.target_width)
+        size = get_target_image_size(image_shape, self.target_size)
         if self.stride > 1:
-            # assert self.stride in [2, 4, 8], 'only stride 2 or 4 is supported'
-            size = (size[0] // self.stride + 1) * self.stride, (size[1] // self.stride  + 1 )* self.stride
+            size = tuple(
+                max(self.stride, int(np.ceil(value / self.stride) * self.stride))
+                for value in size
+            )
         return size
     
 
@@ -262,8 +266,21 @@ class XrayPnoramic(Dataset):
             pass
         return target
     
-    def _read_coco_image(self, index, resizing=True):
-        src, target = self.coco_apis[index]
+    def _read_coco_image(self, index, resizing=True, _retries_left=3):
+        # merge_coco_directories()에서 한 번 걸러내지만, 신규 데이터가 계속 추가되는 파이프라인 특성상
+        # (활발히 복사/변환 중인 파일을 워커가 때마침 읽는 경우 등) 런타임에도 드물게 읽기 실패가 날 수
+        # 있다. DataLoader worker 전체가 죽는 대신 경고만 남기고 다른 샘플로 대체한다.
+        try:
+            src, target = self.coco_apis[index]
+        except Exception as e:
+            if _retries_left <= 0:
+                raise
+            file_name = self.file_name(index)
+            get_logger().warning(
+                f'failed to read image at index {index} ({file_name}): {e!r}; '
+                f'substituting a random sample ({_retries_left} retries left)')
+            fallback_index = np.random.randint(len(self.coco_apis))
+            return self._read_coco_image(fallback_index, resizing=resizing, _retries_left=_retries_left - 1)
         src = np.array(src)
 
         # xray_crop_mode: 원본 해상도 마스크를 직접 crop (③ 자체 데이터, category id = universal 번호)
@@ -304,6 +321,9 @@ class XrayPnoramic(Dataset):
                 area = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
             target = dict(target, boxes=boxes, labels=labels[visible], area=area, iscrowd=iscrowd[visible],
                           orig_size=np.array(src.shape[:2]))
+
+        if self.name == 'train' and getattr(self, 'contrast_aug_cfg', None):
+            src = apply_contrast_aug(src, self.contrast_aug_cfg)
 
         # src = np.arr
         if resizing:
@@ -443,6 +463,49 @@ def label_mapping(labels, num_classes:int):
         # return label2fdi[labels]
 
 
+# 신규 치근단(peri, 1104~) 방사선은 기존 pano/peri 학습 데이터보다 contrast(명암) 분포가 크게 달라
+# (표준편차가 훨씬 큼 -- 극단적으로 밝거나/어두운 픽셀 비중이 높음) 검출이 거의 안 되는 현상이 있었다
+# (outputs/peri_data_fusion/sample_renders 실험 참고). 원인 재현/완화를 위해 학습 시 CLAHE 강화판과
+# 밝기-대비 jitter, 원본을 적당한 분포로 섞어서 학습시킨다 (추론 시 CLAHE를 켜거나/안 켜거나 모두 어느 정도
+# 대응 가능하도록). 세 경우 중 하나를 매 샘플마다 뽑고 나머지 확률은 원본 그대로 사용한다.
+DEFAULT_CONTRAST_AUG_CFG = dict(
+    clahe_prob=0.35,
+    clahe_clip_limit=(1.2, 2.5),
+    clahe_tile_grid=8,
+    brightness_contrast_prob=0.25,
+    brightness_contrast_alpha=(0.7, 1.4),  # 대비(곱)
+    brightness_contrast_beta=(-30, 30),    # 밝기(더하기, 0-255 스케일)
+)
+
+
+def apply_clahe(gray_or_rgb, clip_limit=2.0, tile_grid=8):
+    """CLAHE를 grayscale(2D) 또는 RGB(3채널, R=G=B 가정)에 적용. 가볍고 빠름(단일 CLAHE 호출) --
+    predict.py의 추론 전처리 옵션과 학습 augmentation이 이 함수를 공유한다."""
+    is_rgb = gray_or_rgb.ndim == 3
+    gray = cv2.cvtColor(gray_or_rgb, cv2.COLOR_RGB2GRAY) if is_rgb else gray_or_rgb
+    clahe = cv2.createCLAHE(clipLimit=float(clip_limit), tileGridSize=(int(tile_grid), int(tile_grid)))
+    enhanced = clahe.apply(gray)
+    return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2RGB) if is_rgb else enhanced
+
+
+def apply_contrast_aug(rgb, cfg=DEFAULT_CONTRAST_AUG_CFG, rng=np.random):
+    """학습 샘플 하나에 contrast augmentation 변형 중 하나를 확률대로 선택해 적용 (나머지 확률은 원본 그대로).
+    rgb: uint8 HWC(3채널, grayscale 소스를 반복한 것이어도 무방)."""
+    if not cfg:
+        return rgb
+    r = rng.uniform()
+    clahe_prob = cfg.get('clahe_prob', 0.0)
+    bc_prob = cfg.get('brightness_contrast_prob', 0.0)
+    if r < clahe_prob:
+        clip_limit = rng.uniform(*cfg.get('clahe_clip_limit', (2.0, 2.0)))
+        return apply_clahe(rgb, clip_limit=clip_limit, tile_grid=cfg.get('clahe_tile_grid', 8))
+    if r < clahe_prob + bc_prob:
+        alpha = rng.uniform(*cfg.get('brightness_contrast_alpha', (1.0, 1.0)))
+        beta = rng.uniform(*cfg.get('brightness_contrast_beta', (0.0, 0.0)))
+        return np.clip(rgb.astype(np.float32) * alpha + beta, 0, 255).astype(np.uint8)
+    return rgb
+
+
 def create_albu_transform(max_rotate_degree=8, **params):
     import albumentations as A
     from rfdetr.datasets.aug_albumentations import RandomCropWithRoundedBorder, MaskawareImageAug
@@ -541,6 +604,27 @@ def merge_coco_directories(coco_directories, include_masks):
         print(f'[merge_coco_directories] dropped {len(missing)} images with missing files on disk '
               f'(e.g. {missing[0]["file_name"]})')
 
+    # 신규 배치(예: cbct_ios_dcm_latest_1104) 변환/복사 도중 생긴 손상/0바이트 파일이나 잘못된
+    # width/height 메타데이터가 있어도 DataLoader worker가 죽지 않도록, merge 시점에 한 번만 걸러낸다
+    # (매 epoch I/O가 아니라 dataset 생성 시 1회라 비용이 작다).
+    def _is_bad_image(img):
+        if img.get('width', 0) <= 0 or img.get('height', 0) <= 0:
+            return True
+        try:
+            with Image.open(img['file_name']) as im:
+                im.verify()
+            return False
+        except Exception:
+            return True
+
+    corrupt = [img for img in dataset['images'] if _is_bad_image(img)]
+    if corrupt:
+        corrupt_ids = {img['id'] for img in corrupt}
+        dataset['images'] = [img for img in dataset['images'] if img['id'] not in corrupt_ids]
+        dataset['annotations'] = [ann for ann in dataset['annotations'] if ann['image_id'] not in corrupt_ids]
+        print(f'[merge_coco_directories] dropped {len(corrupt)} images that failed to open/verify or have '
+              f'invalid width/height (e.g. {corrupt[0]["file_name"]})')
+
     primary.coco.createIndex()
     primary.ids = list(sorted(primary.coco.imgs.keys()))
     return primary
@@ -565,6 +649,8 @@ class XrayPnoaramicInstance(XrayPnoramic):
                  xray_crop_cfg: Optional[Dict] = None,
                  eval_xray_crop: bool = False,
                  eval_xray_crop_seed: int = 42,
+                 contrast_aug: Union[bool, Dict] = False,
+                 contrast_aug_cfg: Optional[Dict] = None,
                  **kwargs):
         """
         xray_crop_mode: 학습 샘플 crop 방식 (기본 None: 비활성). eval_xray_crop=True면 검증에도 적용.
@@ -577,6 +663,12 @@ class XrayPnoaramicInstance(XrayPnoramic):
             (예: 두 mode 모두 1.0 -> 0.5 / 0.5, 전체 영상 0%. 두 mode 0.3 -> 0.3 / 0.3 / 전체 영상 0.4)
         xray_crop_cfg: xray_crop_aug.DEFAULT_PERIAPICAL / DEFAULT_TEETH_ROI 덮어쓸 값.
             {'periapical': {...}, 'teeth_roi': {...}} 로 mode별 지정 가능
+        contrast_aug: 학습 시 명암(contrast) augmentation 적용 여부 (기본 False). True면
+            DEFAULT_CONTRAST_AUG_CFG(또는 contrast_aug_cfg로 덮어쓴 값)를 사용해 샘플마다 CLAHE 강화판/
+            밝기-대비 jitter/원본 중 하나를 확률대로 적용. 신규 저해상도 치근단 데이터의 contrast 분포가
+            기존 데이터와 크게 달라 검출이 잘 안 되는 문제 완화용 (eval/val에는 적용하지 않음 -- 평가는
+            항상 원본 분포로 비교).
+        contrast_aug_cfg: DEFAULT_CONTRAST_AUG_CFG 덮어쓸 값.
         """
 
         default_splits = {
@@ -638,19 +730,37 @@ class XrayPnoaramicInstance(XrayPnoramic):
             logger.info(f'xray crop augmentation: probs={self.xray_crop_modes}, full_image={full_prob:.2f}, '
                         f'cfg={self.xray_crop_cfg}')
 
+        # 명암(contrast) augmentation: train split에서만 적용 (eval/val은 항상 원본 분포로 평가)
+        self.contrast_aug_cfg = None
+        if contrast_aug and name == 'train':
+            self.contrast_aug_cfg = dict(DEFAULT_CONTRAST_AUG_CFG, **(contrast_aug_cfg or {}))
+            logger.info(f'contrast augmentation: cfg={self.contrast_aug_cfg}')
+
     # peri(peri apical) 데이터셋은 이미 periapical 형태로 구성되어 있으므로, 파일명에
     # 이 키워드가 들어가면 xray_crop_mode(periapical/teeth_roi) 재적용 대상에서 제외한다.
     PERI_FILENAME_KEYWORDS = ('peri',)
+    # 1104~ 추가분부터는 치근단 방사선 파일명에 'peri' 키워드가 없다 (환자명_날짜.jpg). 대신 해상도가
+    # 작다(가로/세로 모두 1000px 이하) -- 이 규칙으로도 치근단으로 간주해 crop 재적용 대상에서 제외한다.
+    PERI_MAX_RESOLUTION = 1000
 
     def _is_peri_filename(self, full_index):
         filename = os.path.basename(self.file_name(full_index)).casefold()
         return any(k.casefold() in filename for k in self.PERI_FILENAME_KEYWORDS)
 
+    @classmethod
+    def _is_small_resolution(cls, img_hw):
+        h, w = img_hw
+        return h <= cls.PERI_MAX_RESOLUTION and w <= cls.PERI_MAX_RESOLUTION
+
+    def _is_peri_sample(self, full_index, img_hw):
+        """파일명('peri' 키워드) 또는 해상도(<=1000x1000) 중 하나라도 해당하면 치근단 방사선으로 간주."""
+        return self._is_peri_filename(full_index) or self._is_small_resolution(img_hw)
+
     def _sample_crop_plan(self, boxes_xyxy, labels, img_hw, index=0, full_index=None):
         """원본 해상도 기준 crop 계획 (xray_crop_aug.sample_crop). 비활성/전체 영상 선택/실패 시 None."""
         if not self.xray_crop_modes or (self.name != 'train' and not self.eval_xray_crop) or len(boxes_xyxy) == 0:
             return None
-        if self._is_peri_filename(index if full_index is None else full_index):
+        if self._is_peri_sample(index if full_index is None else full_index, img_hw):
             return None
         from rfdetr.datasets.xray_crop_aug import pick_crop_mode, sample_crop
         # 검증에서는 GT 재빌드/worker/epoch와 무관하게 같은 이미지에 같은 crop 적용.
