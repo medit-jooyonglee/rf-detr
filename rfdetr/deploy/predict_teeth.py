@@ -45,27 +45,27 @@ TEMP_EXCLUDED_FILENAME_KEYWORDS = ('peri',)
 
 def is_inference_filename_excluded(file_path):
     """Temporary filename filter used by the batch prediction command."""
-    filename = os.path.basename(os.fspath(file_path)).casefold()
+    filename = os.path.basename(os.fspath(file_path).replace('\\', '/')).casefold()
     return any(
         keyword.casefold() in filename
         for keyword in TEMP_EXCLUDED_FILENAME_KEYWORDS
     )
 
-def get_target_image_size(image_shape, rererence_width:int = 640):
+def get_target_image_size(image_shape, rererence_width: int = 640):
+    """Scale the longer side to the requested size while preserving ratio."""
     ih, iw = image_shape[:2]
-    multiple = 16
-    
-    scale = rererence_width / iw
-    # else:
-        # scale = 
-    # ih = (ih * scale + multiple - 1) // multiple * multiple
-    ih = int(np.ceil(ih * scale / multiple) * multiple)
-    return (ih, rererence_width)
+    if ih <= 0 or iw <= 0 or rererence_width <= 0:
+        raise ValueError("image dimensions and input size must be positive")
+    scale = rererence_width / max(ih, iw)
+    return max(1, int(round(ih * scale))), max(1, int(round(iw * scale)))
     
 
 def get_image_size(shape, stride=64):
     h0, w0 = shape
-    size = (h0 // stride + 1) * stride, (w0 // stride + 1) * stride
+    size = (
+        max(stride, int(np.ceil(h0 / stride) * stride)),
+        max(stride, int(np.ceil(w0 / stride) * stride)),
+    )
     return size
 
 
@@ -1033,11 +1033,11 @@ if __name__ == '__main__':
         ),
     )
     parser.add_argument(
-        '--input-width', '--input_width',
+        '--input-size', '--input_size', '--input-width', '--input_width',
         dest='input_width',
         type=int,
         default=640,
-        help='리사이즈 기준 너비 (cli/main.py --input_width와 동일 기본값). '
+        help='이미지 긴 변을 해당 크기로 종횡비 유지 resize한 뒤 64 배수로 padding. '
              '학습 때 바꿨다면 추론도 같은 값을 넣어야 한다.',
     )
     parser.add_argument(

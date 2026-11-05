@@ -1039,13 +1039,34 @@ class XrayPnoaramicInstance(XrayPnoramic):
         target_img_size = self.get_target_image_size(src.shape[:2])
         if crop_plan is not None and crop_plan['target_hw'] is not None:
             target_img_size = crop_plan['target_hw']  # PA: 긴 변 기준 크기 (가로형/세로형)
-        cv_size = tuple(target_img_size[::-1])
-        src_rsz = cv2.resize(src, cv_size, interpolation=cv2.INTER_LINEAR)
+        target_h, target_w = target_img_size
+        src_h, src_w = src.shape[:2]
+        scale = min(target_w / src_w, target_h / src_h)
+        resized_w = int(round(src_w * scale))
+        resized_h = int(round(src_h * scale))
+        offset_x = (target_w - resized_w) // 2
+        offset_y = (target_h - resized_h) // 2
+
+        resized_src = cv2.resize(src, (resized_w, resized_h), interpolation=cv2.INTER_LINEAR)
+        src_rsz = np.zeros((target_h, target_w), dtype=src.dtype)
+        src_rsz[offset_y:offset_y + resized_h, offset_x:offset_x + resized_w] = resized_src
         src_rsz = np.repeat(src_rsz[..., None], 3, axis=-1) if src_rsz.ndim == 2 else src_rsz
-        scale_wh = np.array(cv_size) / np.array(src.shape[::-1])
-        rsz_valid = cv2.resize(crop_valid, cv_size, interpolation=cv2.INTER_NEAREST) if crop_valid is not None else None
-        
-        rsz_bboxes = (bboxes.reshape([-1, 2]) * scale_wh).reshape(bboxes.shape)
+
+        scale_wh = np.array([scale, scale], dtype=np.float32)
+        offset_wh = np.array([offset_x, offset_y], dtype=np.float32)
+        if crop_valid is not None:
+            resized_valid = cv2.resize(
+                crop_valid, (resized_w, resized_h), interpolation=cv2.INTER_NEAREST
+            )
+            rsz_valid = np.zeros((target_h, target_w), dtype=crop_valid.dtype)
+            rsz_valid[offset_y:offset_y + resized_h, offset_x:offset_x + resized_w] = resized_valid
+        else:
+            rsz_valid = None
+
+        rsz_bboxes = (
+            bboxes.reshape([-1, 2]) * scale_wh + offset_wh
+        ).reshape(bboxes.shape)
+        cv_size = (target_w, target_h)
 
         # Clipping an annotation that lies completely outside the image can
         # collapse it to a zero-area box (for example y_min == y_max == 0).
@@ -1073,7 +1094,10 @@ class XrayPnoaramicInstance(XrayPnoramic):
         # rsz_polygons = 
         if self.include_masks:
             polygons = [annot['segmentation'] for annot in annot_data]
-            rsz_polygons = [np.array(poly).reshape([-1, 2]) * scale_wh for poly in polygons]
+            rsz_polygons = [
+                np.array(poly).reshape([-1, 2]) * scale_wh + offset_wh
+                for poly in polygons
+            ]
             if rsz_polygons:
                 rsz_polygons = np.concatenate(rsz_polygons, axis=0)
             else:
@@ -1572,24 +1596,28 @@ class XrayPnoaramicInstanceCoco(CocoDetection):
     
     
     
-def get_target_image_size(image_shape, rererence_width:int = 640):
+def get_target_image_size(image_shape, rererence_width: int = 640):
+    """Scale the longer image side to the requested size, preserving ratio.
+
+    ``rererence_width`` is retained as a keyword for compatibility with older
+    callers; semantically it is now the maximum (long-side) image size.
+    Padding to a model stride is handled separately.
+    """
     ih, iw = image_shape[:2]
-    multiple = 16
-    
-    scale = rererence_width / iw
-    # else:
-        # scale = 
-    # ih = (ih * scale + multiple - 1) // multiple * multiple
-    ih = int(np.ceil(ih * scale / multiple) * multiple)
-    return (ih, rererence_width)
+    if ih <= 0 or iw <= 0 or rererence_width <= 0:
+        raise ValueError("image dimensions and input size must be positive")
+    scale = rererence_width / max(ih, iw)
+    return max(1, int(round(ih * scale))), max(1, int(round(iw * scale)))
         
 
 def get_size(image_shape, refenrece_width:int=640, stride:int=64):
 
     size =  get_target_image_size(image_shape, refenrece_width)
     if stride > 1:
-        # assert stride in [2, 4, 8], 'only stride 2 or 4 is supported'
-        size = (size[0] // stride + 1) * stride, (size[1] // stride  + 1 )* stride
+        size = tuple(
+            max(stride, int(np.ceil(value / stride) * stride))
+            for value in size
+        )
     return size
 
         

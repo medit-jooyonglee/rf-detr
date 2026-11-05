@@ -23,6 +23,24 @@ def test_resize_image_rejects_invalid_export_size():
         raise AssertionError("Expected invalid resize_hw to raise ValueError")
 
 
+def test_resize_image_scales_landscape_long_side():
+    image = np.zeros((514, 682), dtype=np.uint8)
+
+    resized, content_box = resize_image(image, target_width=640)
+
+    assert resized.shape == (512, 640)
+    assert content_box == (0, 15, 640, 497)
+
+
+def test_resize_image_scales_portrait_long_side():
+    image = np.zeros((669, 514), dtype=np.uint8)
+
+    resized, content_box = resize_image(image, target_width=640)
+
+    assert resized.shape == (640, 512)
+    assert content_box == (10, 0, 502, 640)
+
+
 def test_peri_filename_is_excluded_from_inference():
     assert is_inference_filename_excluded(r"images\patient_PERI_01.jpg")
     assert is_inference_filename_excluded(r"images\periapical.jpeg")
