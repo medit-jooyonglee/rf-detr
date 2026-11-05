@@ -155,8 +155,11 @@ def get_my_arg_parse():
                         default='outputs/pretrained/segmentation/xray_teeth_seg/bounding_bbox_regularization/checkpoint.pth',
                         help='Run save results after training')
     parser.add_argument('--epochs', type=int, default=250, help='학습 epoch 수')
-    parser.add_argument('--input_width', type=int, default=640,
-                        help='리사이즈 기준 너비 (periapical 제외). 실제 입력 너비는 (input_width // 64 + 1) * 64 (640 -> 704, 256 -> 320)')
+    parser.add_argument('--input-size', '--input_size', '--input-width', '--input_width',
+                        dest='input_size', type=int, default=640,
+                        help='종횡비를 유지하며 스케일할 이미지 긴 변 크기(기본 640). '
+                             '실제 텐서는 각 축을 64 배수로 최소 padding. '
+                             '--input_width는 기존 커맨드 호환용 별칭.')
     parser.add_argument('--segmentation_crop_size', type=int, nargs=2, default=[128, 64], metavar=('H', 'W'),
                         help='crop_and_resize refinement ROI 크기 (H W, 4의 배수). 추론(predict)도 같은 값을 써야 한다')
     parser.add_argument('--checkpoint_interval', type=int, default=30, help='checkpoint{epoch}.pth 저장 주기(epoch)')
@@ -467,7 +470,12 @@ def train_from_xray_teeth_dir():
     elif resume_path is not None:
         print(f'[info] --resume: continuing from {resume_path}')
 
-    save_argparse_config(args)
+    save_argparse_config(args, resolved={
+        'input_size': args.input_size,
+        'resize_policy': 'long_side_keep_ratio_letterbox_stride64',
+        'contrast_aug': contrast_aug,
+        'contrast_aug_cfg': contrast_aug_cfg,
+    })
 
     rf_detr.train(
         dataset_dir=dataset_dir,
@@ -502,7 +510,7 @@ def train_from_xray_teeth_dir():
         segmentation_crop_box_scale=1.15,
         coarse_hint_dropout=0.30,
         checkpoint_interval=args.checkpoint_interval,
-        input_width=args.input_width,
+        input_width=args.input_size,
         output_dir=args.output_dir,
         # annot_file='../../xray_coco_33.json',
         # annot_file='../../xray_coco_33.json',
