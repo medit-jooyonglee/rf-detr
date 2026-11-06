@@ -336,7 +336,7 @@ def main(*,
          use_ema=True, with_source_concat=False,
          test_path='',
          save_dir = 'temp/resultsxray',
-         drawing_mode='mask',
+         drawing_mode='polygon',
          polygon_thickness=None,
          overlap_report=None,
          max_images=None,
@@ -788,7 +788,7 @@ def inference_libtorch_model_main():
         
 
 
-def predict_wrapper(img, model=None, drawing_mode='mask',
+def predict_wrapper(img, model=None, drawing_mode='polygon',
                     return_instance_results=False,
                     apply_clahe_enhance=False,
                     clahe_clip_limit=DEFAULT_PREDICT_CLAHE_CLIP_LIMIT,

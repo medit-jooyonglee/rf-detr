@@ -441,10 +441,12 @@ def draw_preditions_boxes(
     with_source_concat=False,
     paste_masks_at_original_size=False,
     input_content_box=None,
-    drawing_mode='mask',
+    drawing_mode='polygon',
     polygon_thickness=None,
     instance_results=None,
     fdi_refinement=True,
+    draw_labels=True,
+    label_font_scale=None,
     **kwargs
 ):
     """Draw predictions, optionally restoring the rendered output to its original size.
@@ -473,6 +475,9 @@ def draw_preditions_boxes(
             reassign labels so they increase monotonically, maximizing the summed
             log class probability. Removes duplicated/outlier FDI numbers; labels
             already in a valid order are left untouched. Requires ``nms_refinement``.
+        draw_labels: Default True. Draws the FDI number above each box.
+        label_font_scale: ``cv2.putText`` fontScale for the FDI number. ``None``
+            auto-scales with the render width.
     """
     if drawing_mode not in ('mask', 'polygon'):
         raise ValueError(f"drawing_mode must be 'mask' or 'polygon', got {drawing_mode!r}")
@@ -504,15 +509,16 @@ def draw_preditions_boxes(
                 input_content_box=input_content_box, drawing_mode=drawing_mode,
                 polygon_thickness=polygon_thickness, instance_results=instance_results,
                 fdi_refinement=fdi_refinement,
+                draw_labels=draw_labels, label_font_scale=label_font_scale,
                 **kwargs,
             )
             rendered.extend(images)
             label_maps.extend(masks)
         return rendered, label_maps
     from trainer import torch_utils
-    from rfdetr.datasets.teeth import draw_bboxes
-    from trainer import utils_numpy, image_utils, time_strftime, vtk_utils
+    from trainer import image_utils, vtk_utils
     from rfdetr.datasets.xraypanoramic import label_to_fdi
+    from rfdetr.datasets.visualize import render_detection, save_rendered_image
     import cv2
     from rfdetr.util import box_ops
     def denorm_boxes_to_xyxy(boxes, img_w, img_h):
@@ -719,7 +725,7 @@ def draw_preditions_boxes(
     res_images = []
     mask_images = []
     for i in range(num_batch):
-        
+
         image = image_utils.to_magnitude_images(images[i])
         if (
             input_content_box is not None
@@ -735,13 +741,7 @@ def draw_preditions_boxes(
                 (render_width, render_height),
                 interpolation=cv2.INTER_LINEAR,
             )
-        
-        # posit = np.logical_and(label[i] > 0, label[i] < num_classes)
-        # posit = pred_scores[i] > threshold
-        
-        # print("posit sum: ", np.sum(posit), '/', probs[i].shape[0])
-        
-        
+
         posit_boxes = boxes[i]
         posit_labels = label[i]
         boxes_xy = posit_boxes.copy()
@@ -750,32 +750,25 @@ def draw_preditions_boxes(
             or (render_height, render_width) != (height, width)
         ):
             boxes_xy = restore_boxes(boxes_xy)
-        # boxes_xy = 
-        
-        src_image = image.copy()
-        
-        # t_boxes_xy = torch_utils.data_convert(boxes_xy)
-        # iou, _ = box_ops.box_iou(t_boxes_xy, t_boxes_xy)
-        draw_bboxes(image, boxes_xy, colors=colors[posit_labels])
+
+        # 모델-입력 좌표의 instance mask를 render(원본) 크기로 복원 -- nearest-neighbor 복원은
+        # merge(label map) 후 리사이즈하거나 인스턴스별로 먼저 리사이즈한 뒤 merge하거나 픽셀 단위로
+        # 동일한 결과를 주므로, drawing_mode/instance_results 여부와 무관하게 항상 인스턴스별로 먼저
+        # 복원해 render_detection에 넘긴다 (mask/polygon 공통 입력 형태로 통일).
+        restored_instance_masks = None
         if pred_masks_label is not None and len(pred_masks_label) > 0:
             posit_masks = pred_masks_label[i]
-            if len(posit_masks) == 0:
-                label_image = np.zeros(posit_masks.shape[-2:], dtype=np.int64)
-            else:
-                label_image = posit_labels[:, None, None] * posit_masks
-                label_image = np.max(label_image, axis=0)
             mask_is_already_restored = (
                 segmentation_mode == 'crop_and_resize'
                 and paste_masks_at_original_size
                 and origin_size is not None
             )
             needs_restore = (
-                label_image.shape != (render_height, render_width)
+                posit_masks.shape[-2:] != (render_height, render_width)
                 or (input_content_box is not None and not mask_is_already_restored)
             )
 
             def restore_to_render(mask_like):
-                # model-input 좌표의 label/instance 마스크를 render(원본) 크기로 복원
                 if not needs_restore:
                     return mask_like
                 if input_content_box is not None:
@@ -789,53 +782,35 @@ def draw_preditions_boxes(
                     interpolation=cv2.INTER_NEAREST,
                 )
 
-            restore_label_image = restore_to_render(label_image)
-            mask_images.append(restore_label_image)
-            restored_instance_masks = None
-            if drawing_mode == 'polygon' or instance_results is not None:
-                restored_instance_masks = [
+            if len(posit_masks) > 0:
+                restored_instance_masks = np.stack([
                     restore_to_render(np.ascontiguousarray(instance_mask, dtype=np.uint8))
                     for instance_mask in posit_masks
-                ]
+                ]).astype(bool)
+            else:
+                restored_instance_masks = np.zeros((0, render_height, render_width), dtype=bool)
+
             if instance_results is not None:
                 instance_results.append({
                     'fdi': np.asarray(posit_labels),
                     'scores': np.asarray(pred_scores[i]),
                     'boxes': boxes_xy,
-                    'masks': (
-                        np.stack(restored_instance_masks).astype(bool)
-                        if len(restored_instance_masks) > 0
-                        else np.zeros((0, render_height, render_width), dtype=bool)
-                    ),
+                    'masks': restored_instance_masks,
                 })
-            if drawing_mode == 'polygon':
-                # 치아별 외곽선을 따로 그려서 인접 치아 사이 중첩 영역이 보이게 한다 (채우지 않음)
-                thickness = polygon_thickness or 2 * max(1, int(round(render_width / 1000)))
-                for instance_mask, instance_label in zip(restored_instance_masks, posit_labels):
-                    contours, _ = cv2.findContours(
-                        instance_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
-                    )
-                    color = tuple(int(c) for c in colors[instance_label])
-                    cv2.polylines(image, contours, True, color, thickness, lineType=cv2.LINE_AA)
-            else:
-                color_label_image = colors[restore_label_image]
-                # image_utils.
-                image = utils_numpy.apply_blending_mask(image, color_label_image)
-            if with_source_concat:
-                image = np.concatenate([src_image, image], axis=1)
-                
+
+        image, label_image = render_detection(
+            image, boxes_xy, posit_labels, colors,
+            masks=restored_instance_masks,
+            drawing_mode=drawing_mode,
+            polygon_thickness=polygon_thickness,
+            with_source_concat=with_source_concat,
+            draw_labels=draw_labels,
+            label_font_scale=label_font_scale,
+        )
+        if restored_instance_masks is not None:
+            mask_images.append(label_image)
         res_images.append(image)
 
         if save:
-            # save_dir = 
-            dated_save_dir = os.path.join(save_dir, time.strftime('%Y%m%d'))
-            if fname:
-                save_name = os.path.join(dated_save_dir, fname)
-            else:
-                save_name = f'{dated_save_dir}/bounding_draw_{time_strftime()}.png'
-            os.makedirs(os.path.dirname(save_name), exist_ok=True)
-            
-            # cv2.imwrite(save_name, image.astype(np.uint8)[..., ::-1])
-            image_utils.cv2_imwrite(save_name, image.astype(np.uint8)[..., ::-1])
-            print("Saved image with bounding boxes to: ", save_name)
+            save_rendered_image(image, save_dir=save_dir, fname=fname)
     return res_images, mask_images
