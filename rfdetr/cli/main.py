@@ -283,11 +283,11 @@ def train_from_xray_teeth_dir():
                     # 1104: 1022 대비 치근단(periapical) 방사선 데이터 추가. 신규 치근단 이미지는 파일명에
                     # 'peri' 키워드가 없고 해상도가 작음(<=1000x1000) -- XrayPnoaramicInstance가 해상도 기준으로
                     # 자동 식별해 crop augmentation 대상에서 제외한다 (rfdetr/datasets/xraypanoramic.py 참고).
-                    ('/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1104/train/',
-                    '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1104/train/annotations.json'),
+                    ('/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1106/train/',
+                    '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1106/train/annotations.json'),
                     (
-                        '/data1/jooyonglee/reverse_tomo/xray_panoramic/seoul_univ_inspect_COCO/train/',
-                        '/data1/jooyonglee/reverse_tomo/xray_panoramic/seoul_univ_inspect_COCO/train/annotations.json',
+                        '/data1/jooyonglee/reverse_tomo/xray_panoramic/seoul_univ_inspect_1106/train/',
+                        '/data1/jooyonglee/reverse_tomo/xray_panoramic/seoul_univ_inspect_1106/train/annotations.json',
                     )
                 ]
             # ③ 자체 데이터 val split (평가 GT에 합쳐서 평가)
@@ -295,8 +295,8 @@ def train_from_xray_teeth_dir():
                     ('/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1104/valid/',
                     '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1104/valid/annotations.json'),
                                         (
-                        '/data1/jooyonglee/reverse_tomo/xray_panoramic/seoul_univ_inspect_COCO/val/',
-                        '/data1/jooyonglee/reverse_tomo/xray_panoramic/seoul_univ_inspect_COCO/val/annotations.json',
+                        '/data1/jooyonglee/reverse_tomo/xray_panoramic/seoul_univ_inspect_1106/val/',
+                        '/data1/jooyonglee/reverse_tomo/xray_panoramic/seoul_univ_inspect_1106/val/annotations.json',
                     )
                 ]
             
