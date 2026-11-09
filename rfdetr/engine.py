@@ -447,6 +447,7 @@ def draw_preditions_boxes(
     fdi_refinement=True,
     draw_labels=True,
     label_font_scale=None,
+    render=True,
     **kwargs
 ):
     """Draw predictions, optionally restoring the rendered output to its original size.
@@ -510,6 +511,7 @@ def draw_preditions_boxes(
                 polygon_thickness=polygon_thickness, instance_results=instance_results,
                 fdi_refinement=fdi_refinement,
                 draw_labels=draw_labels, label_font_scale=label_font_scale,
+                render=render,
                 **kwargs,
             )
             rendered.extend(images)
@@ -801,19 +803,24 @@ def draw_preditions_boxes(
                     'masks': restored_instance_masks,
                 })
 
-        image, label_image = render_detection(
-            image, boxes_xy, posit_labels, colors,
-            masks=restored_instance_masks,
-            drawing_mode=drawing_mode,
-            polygon_thickness=polygon_thickness,
-            with_source_concat=with_source_concat,
-            draw_labels=draw_labels,
-            label_font_scale=label_font_scale,
-        )
+        if render:
+            image, label_image = render_detection(
+                image, boxes_xy, posit_labels, colors,
+                masks=restored_instance_masks,
+                drawing_mode=drawing_mode,
+                polygon_thickness=polygon_thickness,
+                with_source_concat=with_source_concat,
+                draw_labels=draw_labels,
+                label_font_scale=label_font_scale,
+            )
+        else:
+            # render=False: callers that only need `instance_results` skip the (costly) overlay drawing.
+            # `image` stays the un-annotated source image, the label map is None.
+            label_image = None
         if restored_instance_masks is not None:
             mask_images.append(label_image)
         res_images.append(image)
 
-        if save:
+        if save and render:
             save_rendered_image(image, save_dir=save_dir, fname=fname)
     return res_images, mask_images

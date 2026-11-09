@@ -790,6 +790,7 @@ def inference_libtorch_model_main():
 
 def predict_wrapper(img, model=None, drawing_mode='polygon',
                     return_instance_results=False,
+                    render=True,
                     apply_clahe_enhance=False,
                     clahe_clip_limit=DEFAULT_PREDICT_CLAHE_CLIP_LIMIT,
                     clahe_tile_grid=DEFAULT_PREDICT_CLAHE_TILE_GRID):
@@ -800,6 +801,9 @@ def predict_wrapper(img, model=None, drawing_mode='polygon',
     label image is composed.  This is the overlap-preserving input used by
     reverse registration; callers that only need ``(drawing, mask)`` are
     unaffected.
+
+    render: when False the polygon/mask overlay is not drawn (saves ~100 ms per 2 MP image); the returned
+    drawing is then the plain source image and the label map is None. Use with ``return_instance_results``.
 
     apply_clahe_enhance: optional lightweight CLAHE contrast enhancement before
     inference (default off -- existing deployed checkpoints were not trained
@@ -858,6 +862,7 @@ def predict_wrapper(img, model=None, drawing_mode='polygon',
             input_content_box=input_content_box,
             drawing_mode=drawing_mode,
             instance_results=instance_results,
+            render=render,
         )
             
     if return_instance_results:
