@@ -188,3 +188,4 @@ train_test.py
 *.txt
 events.out.tfevents*
 *.csv
+*.yaml

@@ -26,3 +26,38 @@ nohup python -m rfdetr.cli.main \
     --device cuda:5 \
     > logs/fine_tune_pa_teeth_roi.log 2>&1 &
 
+
+
+# cat << 'EOF'
+nohup python -m rfdetr.cli.main \
+  --pretrain_weights outputs/peri_data_fusion/checkpoint.pth \
+  --device cuda:4 \
+  --batch_size 4 \
+  --epochs 500 \
+  --checkpoint_interval 50 \
+  --xray_crop_mode periapical teeth_roi \
+  --xray_crop_prob 0.2 0.4 \
+  --overlap_loss_coef 4.0 \
+  --lr_encoder 1e-5 \
+  --output_dir outputs/peri_data_fusion_1104_ce \
+  > logs/peri_data_fusion_1104_ce.log 2>&1 &
+
+
+
+nohup python -m rfdetr.cli.main \
+  --pretrain_weights outputs/peri_data_fusion_1104_ce/checkpoint.pth \
+  --device cuda:4 \
+  --batch_size 4 \
+  --epochs 300 \
+  --checkpoint_interval 50 \
+  --xray_crop_mode periapical teeth_roi \
+  --xray_crop_prob 0.2 0.4 \
+  --overlap_loss_coef 4.0 \
+  --lr_encoder 1e-5 \
+  --output_dir outputs/peri_data_fusion_1106_ce \
+  > logs/peri_data_fusion_1106_ce.log 2>&1 &
+
+
+
+
+# nohup python -m rfdetr.cli.main --pretrain_weights outputs/peri_data_fusion/checkpoint.pth --device cuda:4 --batch_size 4 --epochs 500 --checkpoint_interval 50 --xray_crop_mode periapical teeth_roi --xray_crop_prob 0.2 0.4 --overlap_loss_coef 4.0 --lr_encoder 1e-5 --output_dir outputs/peri_data_fusion_1104_ce > logs/peri_data_fusion_1104_ce.log 2>&1 &  

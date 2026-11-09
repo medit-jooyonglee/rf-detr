@@ -11,6 +11,15 @@ teeth-segmentation-3d 의 PostProcessingFdinumbering(template_matching combinati
 label 은 universal numbering (xraypanoramic.universal_to_fdi) 기준:
     1~16  : 상악, 영상 왼쪽 -> 오른쪽 (18 ... 11, 21 ... 28)
     17~32 : 하악, 영상 오른쪽 -> 왼쪽 (38 ... 31, 41 ... 48)
+
+**중요(예외처리 필요)**: 아래 로직은 영구치(permanent teeth) 32개, arch당 정확히
+16개라는 가정(NUM_ARCH_TEETH, UPPER_LABELS, LOWER_LABELS) 위에서 "x좌표 순 ->
+label 단조 증가" 제약으로 DP 최적해를 구한다. 유치(deciduous/primary teeth, FDI
+51~85 대역)처럼 모델 클래스 공간에 32개를 초과하는 라벨(혼합치열 mixed dentition
+포함)이 추가되는 순간 이 가정이 깨지므로, 그 전에 반드시 유치 전용 분기(별도의
+arch 크기/label 범위, 혹은 영구치/유치를 먼저 분리한 뒤 각각 보정)를 추가해야
+한다. 지금처럼 그대로 호출하면 유치 라벨이 섞인 입력에서 잘못된 보정을 할 수
+있다. 호출부: rfdetr/engine.py::draw_preditions_boxes (fdi_refinement=True).
 """
 import numpy as np
 
@@ -55,6 +64,10 @@ def refine_fdi_labels(labels, probs, boxes_xyxy, eps=1e-6, verbose=True):
 
     Returns:
         (N,) 보정된 label. argmax 결과가 이미 단조 증가(중복 없음)이면 그대로 유지된다.
+
+    주의: labels/probs 는 영구치 32-class(1~32 universal label) 전제. 유치 라벨이
+    섞여 들어오면(예외처리 미구현) arch당 16개 제약이 깨져 보정이 틀릴 수 있다 --
+    모듈 docstring 참고.
     """
     labels = np.asarray(labels)
     refined = labels.copy()

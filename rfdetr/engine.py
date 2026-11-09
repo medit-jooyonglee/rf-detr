@@ -612,6 +612,9 @@ def draw_preditions_boxes(
             keep_labels = pred_label[ib][keep_indices]
             keep_scores = pred_scores[ib][keep_indices]
             if fdi_refinement and len(keep_indices) > 0:
+                # 예외처리 필요: refine_fdi_labels는 영구치 32개(arch당 16개) 전제.
+                # 유치(deciduous teeth, 32개보다 훨씬 많은 라벨 공간) 지원 시에는
+                # 이 호출 전에 반드시 별도 분기/처리가 필요하다 (fdi_refinement.py 참고).
                 from rfdetr.util.fdi_refinement import refine_fdi_labels
                 keep_probs = probs[ib][keep_indices]
                 keep_labels = refine_fdi_labels(keep_labels, keep_probs, boxes[ib][keep_indices])

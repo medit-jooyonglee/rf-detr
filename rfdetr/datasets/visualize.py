@@ -147,8 +147,8 @@ DEFAULT_COCO_DIRECTORIES = [
 DEFAULT_COCO_DIRECTORIES_VAL = [
     ('/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1104/valid/',
      '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_1104/valid/annotations.json'),
-    ('/data1/jooyonglee/reverse_tomo/xray_panoramic/seoul_univ_inspect_1106/val/',
-     '/data1/jooyonglee/reverse_tomo/xray_panoramic/seoul_univ_inspect_1106/val/annotations.json'),
+    ('/data1/jooyonglee/reverse_tomo/xray_panoramic/seoul_univ_inspect_1106/valid/',
+     '/data1/jooyonglee/reverse_tomo/xray_panoramic/seoul_univ_inspect_1106/valid/annotations.json'),
 ]
 DEFAULT_NUM_CLASSES = 32
 
