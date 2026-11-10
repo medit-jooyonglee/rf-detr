@@ -645,12 +645,19 @@ def draw_preditions_boxes(
             mask_probability_threshold / (1.0 - mask_probability_threshold)
         )
         if segmentation_mode == 'crop_and_resize':
-            from rfdetr.models.segmentation_head import paste_masks_in_image
+            from rfdetr.models.segmentation_head import paste_masks_to_numpy
 
             # ROI masks are expensive to reconstruct at full image resolution.
             # Select positive, NMS-surviving queries before pasting so discarded
             # background/duplicate queries never allocate a full-image canvas.
             pred_masks_label = []
+            # Render-space bound of each instance's mask support (the same
+            # expand_normalized_boxes(..., segmentation_crop_box_scale) box
+            # paste_masks_in_image pasted into -- NOT `boxes` (the unscaled
+            # detection box), which is smaller and would clip the mask).
+            # render_detection uses this to restrict its label_image merge to
+            # each instance's own region instead of scanning the full canvas.
+            mask_boxes_render = []
             for batch_index in range(pred_masks.shape[0]):
                 batch_masks = pred_masks[batch_index]
                 if selected_query_indices is not None:
@@ -666,15 +673,29 @@ def draw_preditions_boxes(
                 if paste_masks_at_original_size and origin_size is not None:
                     paste_boxes = restore_boxes(paste_boxes)
                     paste_size = (render_height, render_width)
-                pasted_masks = paste_masks_in_image(
-                    batch_masks,
-                    torch.as_tensor(paste_boxes, device=pred_masks.device),
-                    paste_size,
-                )
+                    mask_boxes_render.append(paste_boxes)
+                else:
+                    mask_boxes_render.append(restore_boxes(mask_boxes[batch_index]))
+                # paste_masks_to_numpy (not paste_masks_in_image + a separate
+                # GPU->CPU transfer of the full canvas): transferring the
+                # full (K, image_h, image_w) canvas costs ~65-85ms for a
+                # 28-tooth 1468x2988 image, dominated by data volume, not
+                # compute, since each instance's real content is only its own
+                # small box (`rfdetr/deploy/profile_onepass_postprocess.py`).
+                # This transfers only the small per-instance crops and builds
+                # the full canvas on CPU after -- identical output, see
+                # `rfdetr/deploy/profile_paste_masks.py` for the correctness
+                # check against the old path.
                 pred_masks_label.append(
-                    torch_utils.to_numpy(pasted_masks > mask_logit_threshold)
+                    paste_masks_to_numpy(
+                        batch_masks,
+                        torch.as_tensor(paste_boxes, device=pred_masks.device),
+                        paste_size,
+                        mask_logit_threshold,
+                    )
                 )
         else:
+            mask_boxes_render = None
             pred_masks = F.interpolate(
                 pred_masks,
                 size=inputs_arrays.shape[-2:],
@@ -691,6 +712,7 @@ def draw_preditions_boxes(
                 ]
     else:
         pred_masks_label = None
+        mask_boxes_render = None
 
     if isinstance(pred_label, list):
         label = []
@@ -759,6 +781,7 @@ def draw_preditions_boxes(
             or (render_height, render_width) != (height, width)
         ):
             boxes_xy = restore_boxes(boxes_xy)
+        mask_boxes_xy = mask_boxes_render[i] if mask_boxes_render is not None else None
 
         # 모델-입력 좌표의 instance mask를 render(원본) 크기로 복원 -- nearest-neighbor 복원은
         # merge(label map) 후 리사이즈하거나 인스턴스별로 먼저 리사이즈한 뒤 merge하거나 픽셀 단위로
@@ -811,6 +834,7 @@ def draw_preditions_boxes(
             image, label_image = render_detection(
                 image, boxes_xy, posit_labels, colors,
                 masks=restored_instance_masks,
+                mask_boxes_xy=mask_boxes_xy,
                 drawing_mode=drawing_mode,
                 polygon_thickness=polygon_thickness,
                 with_source_concat=with_source_concat,

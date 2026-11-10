@@ -41,7 +41,7 @@ def panel(gray, fdi, masks, title):
         c = color(f)
         m = masks[i].astype(np.uint8)
         contours, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(img, contours, -1, c, 2)
+        cv2.drawContours(img, contours, -1, c, 4)
         M = cv2.moments(m)
         if M['m00'] > 0:
             cx, cy = int(M['m10'] / M['m00']), int(M['m01'] / M['m00'])
@@ -84,7 +84,9 @@ def main():
         tiles = [cv2.resize(p, None, fx=scale, fy=scale) for p in (p_raw, p_gt, p_one, p_two)]
         combined = np.concatenate(tiles, axis=1)
         out_path = OUT_DIR / f"{tag}_v2.jpg"
-        cv2.imwrite(str(out_path), combined)
+        # vtk_utils 색상 테이블은 RGB 순서(rfdetr/datasets/visualize.py의 관례와 동일) --
+        # cv2.imwrite는 BGR로 저장하므로 끝에서 한 번만 채널을 뒤집는다.
+        cv2.imwrite(str(out_path), combined[..., ::-1])
         print('saved:', out_path)
 
 

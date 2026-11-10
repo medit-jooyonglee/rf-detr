@@ -5,9 +5,11 @@
 # ------------------------------------------------------------------------
 
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from numba import njit, prange
 from typing import Callable
 
 def scale_coarse_probability_hint(
@@ -141,6 +143,161 @@ def paste_masks_in_image(
         )[0, 0]
         pasted[index, y0:y1, x0:x1] = resized
     return pasted
+
+
+def paste_masks_to_numpy(
+    masks: torch.Tensor,
+    boxes_xyxy: torch.Tensor,
+    image_size: tuple[int, int],
+    mask_logit_threshold: float,
+) -> np.ndarray:
+    """Threshold + paste ROI mask logits into a ``(K, H, W)`` numpy bool
+    array -- mathematically identical to
+    ``(paste_masks_in_image(masks, boxes_xyxy, image_size) > mask_logit_threshold).cpu().numpy()``,
+    just reordered so the GPU->CPU transfer only ever moves each instance's
+    own (small) box-sized crop, never the full ``(K, H, W)`` canvas.
+
+    ``paste_masks_in_image`` resizes each instance to its box size on GPU,
+    writes it into a full-image-sized GPU canvas, and the caller then
+    transfers that WHOLE canvas to CPU before thresholding. For a 28-tooth
+    1468x2988 image that's a ~123MB transfer costing ~65-85ms (dominated by
+    data volume, not compute -- see rfdetr/deploy/profile_onepass_postprocess.py),
+    even though each instance's actual content only occupies its own small
+    box. Here, each instance is resized AND thresholded on GPU (still small),
+    every instance's thresholded crop is packed into one flat buffer so a
+    single transfer/sync covers all of them (many tiny separate `.cpu()`
+    calls would each still pay their own launch/sync overhead), and the full
+    ``(K, H, W)`` canvas is built on CPU, after the transfer, via cheap
+    zero-array + per-instance slice assignment (the same pattern
+    `two_pass_predict` already uses to paste a crop's result back into the
+    full image). The background fill value replicates
+    ``paste_masks_in_image``'s zero-canvas default exactly (0.0 compared
+    against the threshold), not just ``False``, so this stays a correct
+    drop-in even if ``mask_logit_threshold`` is ever negative.
+    """
+    image_h, image_w = image_size
+    num = masks.shape[0]
+    background = bool(0.0 > mask_logit_threshold)
+    pasted = np.full((num, image_h, image_w), background, dtype=bool)
+    if num == 0:
+        return pasted
+
+    int_boxes = []
+    small_masks = []
+    for mask, box in zip(masks, boxes_xyxy):
+        x0 = max(int(torch.floor(box[0]).item()), 0)
+        y0 = max(int(torch.floor(box[1]).item()), 0)
+        x1 = min(int(torch.ceil(box[2]).item()), image_w)
+        y1 = min(int(torch.ceil(box[3]).item()), image_h)
+        int_boxes.append((x0, y0, x1, y1))
+        if x1 <= x0 or y1 <= y0:
+            small_masks.append(None)
+            continue
+        resized = F.interpolate(
+            mask[None, None],
+            size=(y1 - y0, x1 - x0),
+            mode='bilinear',
+            align_corners=False,
+        )[0, 0]
+        small_masks.append(resized > mask_logit_threshold)
+
+    valid = [(index, m) for index, m in enumerate(small_masks) if m is not None]
+    if not valid:
+        return pasted
+
+    flat = torch.cat([m.reshape(-1) for _, m in valid])
+    flat_np = flat.cpu().numpy()
+
+    offset = 0
+    for index, m in valid:
+        n = m.numel()
+        x0, y0, x1, y1 = int_boxes[index]
+        pasted[index, y0:y1, x0:x1] = flat_np[offset:offset + n].reshape(y1 - y0, x1 - x0)
+        offset += n
+    return pasted
+
+
+@njit(cache=True, parallel=True)
+def _paste_masks_numba_kernel(
+    masks: np.ndarray,
+    boxes: np.ndarray,
+    out: np.ndarray,
+) -> None:
+    """Bilinear paste (align_corners=False, matches F.interpolate) of each
+    mask into its integer box region of `out`, one compiled pass over all
+    instances in parallel instead of one F.interpolate call per box."""
+    mask_h, mask_w = masks.shape[1], masks.shape[2]
+    for k in prange(masks.shape[0]):
+        x0, y0, x1, y1 = boxes[k, 0], boxes[k, 1], boxes[k, 2], boxes[k, 3]
+        out_h, out_w = y1 - y0, x1 - x0
+        if out_h <= 0 or out_w <= 0:
+            continue
+        scale_y = mask_h / out_h
+        scale_x = mask_w / out_w
+        for oy in range(out_h):
+            src_y = (oy + 0.5) * scale_y - 0.5
+            if src_y < 0.0:
+                src_y = 0.0
+            iy0 = int(src_y)
+            if iy0 > mask_h - 1:
+                iy0 = mask_h - 1
+            iy1 = iy0 + 1 if iy0 + 1 <= mask_h - 1 else mask_h - 1
+            wy1 = src_y - iy0
+            wy0 = 1.0 - wy1
+            for ox in range(out_w):
+                src_x = (ox + 0.5) * scale_x - 0.5
+                if src_x < 0.0:
+                    src_x = 0.0
+                ix0 = int(src_x)
+                if ix0 > mask_w - 1:
+                    ix0 = mask_w - 1
+                ix1 = ix0 + 1 if ix0 + 1 <= mask_w - 1 else mask_w - 1
+                wx1 = src_x - ix0
+                wx0 = 1.0 - wx1
+                out[k, y0 + oy, x0 + ox] = (
+                    wy0 * (wx0 * masks[k, iy0, ix0] + wx1 * masks[k, iy0, ix1])
+                    + wy1 * (wx0 * masks[k, iy1, ix0] + wx1 * masks[k, iy1, ix1])
+                )
+
+
+def paste_masks_in_image_by_numba(
+    masks: torch.Tensor,
+    boxes_xyxy: torch.Tensor,
+    image_size: tuple[int, int],
+) -> torch.Tensor:
+    """Numba-accelerated drop-in replacement for `paste_masks_in_image`.
+
+    `paste_masks_in_image` pays two costs per box: a Python-level
+    F.interpolate call and 4 `.item()` GPU->CPU syncs for the box bounds.
+    This version moves masks/boxes to host memory once (a single bulk
+    transfer) and runs the bilinear paste as one compiled, parallel-over-
+    instances loop (`_paste_masks_numba_kernel`). The result is returned on
+    CPU: the only caller (`rfdetr/engine.py`'s `crop_and_resize` branch)
+    immediately thresholds it and converts it to numpy, so re-uploading to
+    GPU would be a pure round-trip with no benefit. Kept alongside the
+    original (not a replacement) so the two can be A/B compared; see
+    `rfdetr/deploy/profile_paste_masks.py`.
+    """
+    image_h, image_w = image_size
+    num = masks.shape[0]
+    if num == 0:
+        return masks.new_zeros((0, image_h, image_w)).cpu()
+
+    masks_np = np.ascontiguousarray(
+        masks.detach().to(torch.float32).cpu().numpy()
+    )
+    boxes_np = boxes_xyxy.detach().to(torch.float32).cpu().numpy()
+    x0 = np.clip(np.floor(boxes_np[:, 0]), 0, image_w)
+    y0 = np.clip(np.floor(boxes_np[:, 1]), 0, image_h)
+    x1 = np.clip(np.ceil(boxes_np[:, 2]), 0, image_w)
+    y1 = np.clip(np.ceil(boxes_np[:, 3]), 0, image_h)
+    int_boxes = np.ascontiguousarray(
+        np.stack([x0, y0, x1, y1], axis=1).astype(np.int64)
+    )
+
+    out = np.zeros((num, image_h, image_w), dtype=np.float32)
+    _paste_masks_numba_kernel(masks_np, int_boxes, out)
+    return torch.from_numpy(out).to(dtype=masks.dtype)
 
 
 class _CropConvBlock(nn.Module):

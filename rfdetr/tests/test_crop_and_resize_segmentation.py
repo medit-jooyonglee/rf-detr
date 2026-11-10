@@ -189,16 +189,16 @@ def test_draw_predictions_pastes_only_positive_nms_queries(monkeypatch):
     paste_query_counts = []
     paste_image_sizes = []
     pasted_boxes = []
-    original_paste_masks = segmentation_head.paste_masks_in_image
+    original_paste_masks = segmentation_head.paste_masks_to_numpy
 
-    def recording_paste_masks(masks, boxes, image_size):
+    def recording_paste_masks(masks, boxes, image_size, mask_logit_threshold):
         paste_query_counts.append(masks.shape[0])
         paste_image_sizes.append(image_size)
         pasted_boxes.append(boxes.cpu())
-        return original_paste_masks(masks, boxes, image_size)
+        return original_paste_masks(masks, boxes, image_size, mask_logit_threshold)
 
     monkeypatch.setattr(
-        segmentation_head, "paste_masks_in_image", recording_paste_masks
+        segmentation_head, "paste_masks_to_numpy", recording_paste_masks
     )
     monkeypatch.setattr(teeth, "draw_bboxes", lambda *args, **kwargs: None)
     monkeypatch.setattr(xraypanoramic, "label_to_fdi", lambda labels: labels)

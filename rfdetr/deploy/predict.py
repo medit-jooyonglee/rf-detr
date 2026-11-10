@@ -41,6 +41,15 @@ DEFAULT_TWO_PASS_ROI_MARGIN = 0.08
 # 그대로 쓴다. periapical/peri류 입력은 이미 치아가 프레임을 거의 꽉 채워 crop이 거의 줄지
 # 않으므로, 별도 peri 판별(파일명/해상도) 없이 이 기준 하나로 two-pass가 pano에만 적용된다.
 DEFAULT_TWO_PASS_SHRINK_RATIO = 0.85
+# 2차 crop이 1차(전체 이미지) 대비 실제로 유효 해상도를 얼마나 올려주는지(scale_gain) 기준 -- 둘 다
+# resize_image()의 content_box(letterbox 패딩 제외 실제 내용물 영역)로 계산한 스케일의 비율.
+# peri류는 원본 자체가 이미 치아로 꽉 차 있어 crop해도 scale_gain이 거의 1.0이라 2차가 무의미하다.
+# roi_shrink_ratio(면적 기준)만으로는 이런 peri 케이스를 충분히 걸러내지 못해(실측:
+# cbct_peri 27/37, seoul_peri 33/55가 면적 기준은 통과해 2차까지 실행됨) scale_gain을 주 기준으로
+# 추가한다. 실측 분포(rfdetr/deploy/scale_gain_stats.py, 2026-11-10): cbct_pano/seoul_pano는
+# scale_gain 최솟값이 1.315/1.518, cbct_peri/seoul_peri는 중앙값이 1.227/1.213 -- 1.3을 기준으로
+# 두면 거의 모든 pano는 통과하고 대부분의 peri는 자동으로 one-pass로 떨어진다.
+DEFAULT_TWO_PASS_MIN_SCALE_GAIN = 1.3
 # 2차(crop 후 재추론) confidence threshold. 1차/one-pass와 같은 score 공간이라도 crop으로
 # 전체 이미지 context(치아 전체 배치/위아래 기준점)가 사라지면서 confidence 캘리브레이션이
 # 달라져 1차의 0.5를 그대로 쓰면 멀쩡히 맞춘 치아가 threshold에 걸려 사라진다 (image_4 사례:
@@ -368,9 +377,10 @@ def main(*,
          clahe_tile_grid=DEFAULT_PREDICT_CLAHE_TILE_GRID,
          used_export=False,
          export_shape=EXPORT_FIX_SIZE,
-         two_pass=False,
+         two_pass=True,
          roi_margin=DEFAULT_TWO_PASS_ROI_MARGIN,
          roi_shrink_ratio=DEFAULT_TWO_PASS_SHRINK_RATIO,
+         min_scale_gain=DEFAULT_TWO_PASS_MIN_SCALE_GAIN,
          pass2_confidence_threshold=DEFAULT_TWO_PASS_PASS2_CONFIDENCE_THRESHOLD,
          **kwargs):
     """used_export: pretrain_weights를 export된 libtorch(.pt) 모델로 보고 추론 (고정 입력 크기 letterbox)."""
@@ -446,6 +456,7 @@ def main(*,
                     mask_probability_threshold=MASK_PROBABILITY_THRESHOLD,
                     segmentation_crop_box_scale=1.15, with_source_concat=with_source_concat,
                     roi_margin=roi_margin, roi_shrink_ratio=roi_shrink_ratio,
+                    min_scale_gain=min_scale_gain,
                     pass2_confidence_threshold=pass2_confidence_threshold,
                     convert_options=convert_options,
                 )
@@ -824,10 +835,23 @@ def inference_libtorch_model_main():
 def _predict_single_pass(img, model, convert_options, drawing_mode='polygon',
                           mask_probability_threshold=MASK_PROBABILITY_THRESHOLD,
                           segmentation_crop_box_scale=1.15, with_source_concat=False,
-                          fdi_refinement=True, resize_hw=None, confidence_threshold=0.5):
+                          fdi_refinement=True, resize_hw=None, confidence_threshold=0.5,
+                          render=True, polygon_thickness=None, label_font_scale=None):
     """img(전체 또는 crop) 1회 추론 + draw_preditions_boxes. img 자신의 해상도를 기준으로
     (color_image, mask_image, instance_result)를 반환한다 (batch 차원은 이미 벗겨져 있음).
-    two_pass_predict()의 1차/2차 호출과 predict_wrapper()의 one-pass 경로가 공유한다."""
+    two_pass_predict()의 1차/2차 호출과 predict_wrapper()의 one-pass 경로가 공유한다.
+
+    render=False: box/fdi/score/mask(instance_result)는 그대로 채우되 원본 해상도 캔버스에
+    색칠/polygon을 그리는 단계를 건너뛴다 (color_image/mask_image는 draw_preditions_boxes의
+    render=False 계약대로 그린-배경/None에 가까운 값). two_pass_predict()가 1차를 ROI/게이팅
+    판단에만 쓰고 버릴 때 쓴다 -- 치아가 많은 pano에서 원본 해상도로 mask paste + contour 그리기가
+    전체 시간의 대부분(실측 496ms 중 318ms, `rfdetr/deploy/profile_two_pass.py`)이라 결과를
+    쓰지도 않을 1차 렌더링을 생략하면 그만큼 아낀다.
+
+    polygon_thickness/label_font_scale: ``None``이면 ``render_detection``이 ``img`` 자신의 폭
+    기준으로 자동 스케일한다. two_pass_predict()가 2차(crop 해상도)를 그릴 때는 최종 합성
+    캔버스(원본 전체 해상도)의 폭 기준으로 명시적으로 넘겨, "crop이라서 선이 얇아지는" 시각적
+    차이가 생기지 않게 한다."""
     rsz_img, content_box = resize_image(img, stride=64, resize_hw=resize_hw)
     img2 = np.repeat(rsz_img[None], 3, axis=0) / 255.
     img_tensor = torch_utils.data_convert(img2[None], **convert_options)
@@ -856,6 +880,9 @@ def _predict_single_pass(img, model, convert_options, drawing_mode='polygon',
             instance_results=instance_results,
             fdi_refinement=fdi_refinement,
             confidence_threshold=confidence_threshold,
+            render=render,
+            polygon_thickness=polygon_thickness,
+            label_font_scale=label_font_scale,
         )
     return color_image[0], mask_image[0], instance_results[0]
 
@@ -864,7 +891,8 @@ def two_pass_predict(img, model, drawing_mode='polygon',
                       mask_probability_threshold=MASK_PROBABILITY_THRESHOLD,
                       segmentation_crop_box_scale=1.15, with_source_concat=False,
                       fdi_refinement=True, roi_margin=DEFAULT_TWO_PASS_ROI_MARGIN,
-                      roi_shrink_ratio=DEFAULT_TWO_PASS_SHRINK_RATIO, convert_options=None,
+                      roi_shrink_ratio=DEFAULT_TWO_PASS_SHRINK_RATIO,
+                      min_scale_gain=DEFAULT_TWO_PASS_MIN_SCALE_GAIN, convert_options=None,
                       pass1_confidence_threshold=0.5,
                       pass2_confidence_threshold=DEFAULT_TWO_PASS_PASS2_CONFIDENCE_THRESHOLD):
     """1차: 전체 이미지 추론. 1차에서 검출된 치아 bbox로
@@ -874,10 +902,16 @@ def two_pass_predict(img, model, drawing_mode='polygon',
     영역만 640폭으로 키우므로 치아당 유효 입력 해상도가 올라간다).
 
     **peri 이미지와의 구분(예외처리)**: 이미 periapical/peri류처럼 치아가 프레임 대부분을
-    차지하는 입력은 1차 bbox 합집합이 원본과 거의 같아서 crop이 "거의 줄지 않는다". crop 면적이
-    원본 면적의 ``roi_shrink_ratio``(기본 0.85) 이상이면 2차를 생략하고 1차 결과를 그대로
-    반환한다 -- 파일명/해상도 기반 peri 판별 로직 없이, crop이 실제로 줄어드는지만으로 자연스럽게
-    pano에만 2차가 적용된다.
+    차지하는 입력은 1차 bbox 합집합이 원본과 거의 같아서 crop이 "거의 줄지 않는다". 1차 체크로
+    crop 면적이 원본 면적의 ``roi_shrink_ratio``(기본 0.85) 이상이면 바로 2차를 생략한다. 이걸
+    통과해도, crop이 실제로 유효 해상도를 올려주는지(``min_scale_gain``, 기본 1.3)를 다시 본다 --
+    면적만으로는 peri류를 충분히 걸러내지 못함을 실측으로 확인했음(cbct_peri 27/37, seoul_peri
+    33/55가 면적 기준은 통과해 2차까지 실행됨, `outputs/eval_fdi_refinement/
+    summary_export_vs_twopass.json`). scale_gain은 전체 이미지 vs crop을 각각
+    ``resize_image()``로 리사이즈할 때의 content_box(letterbox 패딩 제외 실제 내용물) 스케일
+    비율 -- peri류는 crop해도 이 비율이 거의 1.0이라 자동으로 one-pass로 떨어진다 (실측 분포:
+    `rfdetr/deploy/scale_gain_stats.py`). 파일명/해상도 기반 peri 판별 로직 없이, 두 기준 모두
+    자연스럽게 pano에만 2차가 적용된다.
 
     **pass1/pass2 confidence threshold를 분리한 이유**: crop으로 전체 이미지 context(치아 전체
     배치, 상/하악 판단 기준점)가 사라지면서 2차의 confidence 캘리브레이션이 1차와 달라진다. 같은
@@ -897,19 +931,27 @@ def two_pass_predict(img, model, drawing_mode='polygon',
         convert_options = ({'device': model_parameter.device, 'dtype': model_parameter.dtype}
                             if model_parameter is not None else {})
 
-    color1, mask1, inst1 = _predict_single_pass(
-        img, model, convert_options, drawing_mode=drawing_mode,
-        mask_probability_threshold=mask_probability_threshold,
-        segmentation_crop_box_scale=segmentation_crop_box_scale,
-        with_source_concat=with_source_concat, fdi_refinement=fdi_refinement,
-        confidence_threshold=pass1_confidence_threshold)
+    def pass1_kwargs(render):
+        return dict(
+            drawing_mode=drawing_mode, mask_probability_threshold=mask_probability_threshold,
+            segmentation_crop_box_scale=segmentation_crop_box_scale,
+            with_source_concat=with_source_concat, fdi_refinement=fdi_refinement,
+            confidence_threshold=pass1_confidence_threshold, render=render)
+
+    # 1차는 우선 render=False로 가볍게 돌려 box/fdi/score만 얻는다(ROI/게이팅 판단용). 2차가
+    # 실제로 진행되면 1차의 전체 렌더링(원본 해상도 mask paste + contour, pano에서 실측 ~500ms,
+    # `rfdetr/deploy/profile_two_pass.py`)은 어차피 버려지는 값이라 아예 그리지 않는다. 2차가
+    # 생략되는 경로(peri류)에서만 아래에서 다시 render=True로 재호출해 최종 결과를 만든다.
+    _, _, inst1 = _predict_single_pass(img, model, convert_options, **pass1_kwargs(render=False))
 
     if inst1['boxes'].shape[0] == 0:
+        color1, mask1, inst1 = _predict_single_pass(img, model, convert_options, **pass1_kwargs(render=True))
         return color1, mask1, inst1, False, None
 
     crop_box = teeth_roi_box_center_aware(inst1['boxes'], inst1['fdi'], (h, w),
                                           cfg={'eval_margin': roi_margin})
     if crop_box is None:
+        color1, mask1, inst1 = _predict_single_pass(img, model, convert_options, **pass1_kwargs(render=True))
         return color1, mask1, inst1, False, None
 
     x0, y0, x1, y1 = crop_box
@@ -918,15 +960,32 @@ def two_pass_predict(img, model, drawing_mode='polygon',
     crop_w, crop_h = x1i - x0i, y1i - y0i
     if crop_w <= 0 or crop_h <= 0 or crop_w * crop_h >= roi_shrink_ratio * w * h:
         # crop이 원본 대비 거의 줄지 않음 (peri류로 이미 꽉 차 있음) -> 2차 생략, 1-pass로 종료
+        color1, mask1, inst1 = _predict_single_pass(img, model, convert_options, **pass1_kwargs(render=True))
         return color1, mask1, inst1, False, crop_box
 
     crop_img = img[y0i:y1i, x0i:x1i]
-    _, _, inst2 = _predict_single_pass(
+    _, content_box_full = resize_image(img, stride=64)
+    scale1 = (content_box_full[2] - content_box_full[0]) / w
+    _, content_box_crop = resize_image(crop_img, stride=64)
+    scale2 = (content_box_crop[2] - content_box_crop[0]) / crop_w
+    if scale1 <= 0 or scale2 / scale1 < min_scale_gain:
+        # crop해도 유효 해상도 이득이 충분하지 않음 (peri류) -> 2차 생략, 1-pass로 종료
+        color1, mask1, inst1 = _predict_single_pass(img, model, convert_options, **pass1_kwargs(render=True))
+        return color1, mask1, inst1, False, crop_box
+
+    # polygon_thickness/label_font_scale을 원본(전체) 폭 기준으로 고정해서 넘긴다. crop 해상도로
+    # render_detection을 부르면 자동 스케일이 crop 폭(작음) 기준으로 얇아져, 아래에서 그대로
+    # 합성했을 때 "two-pass만 선이 얇아지는" 의도치 않은 시각적 차이가 생기기 때문.
+    full_thickness = 2 * max(1, int(round(w / 1000)))
+    full_font_scale = max(0.5, w / 1600.0)
+
+    color2_crop, mask2_crop, inst2 = _predict_single_pass(
         crop_img, model, convert_options, drawing_mode=drawing_mode,
         mask_probability_threshold=mask_probability_threshold,
         segmentation_crop_box_scale=segmentation_crop_box_scale,
         with_source_concat=False, fdi_refinement=fdi_refinement,
-        confidence_threshold=pass2_confidence_threshold)
+        confidence_threshold=pass2_confidence_threshold,
+        polygon_thickness=full_thickness, label_font_scale=full_font_scale)
 
     # crop-local 좌표 -> 원본 좌표로 평행이동 (각주: 2차 결과가 1차를 완전히 대체한다. 1차에서
     # 검출된 치아는 teeth_roi_box_center_aware 구성상 margin 포함 crop 안에 항상 들어있지만,
@@ -937,15 +996,20 @@ def two_pass_predict(img, model, drawing_mode='polygon',
     full_masks[:, y0i:y1i, x0i:x1i] = inst2['masks']
     inst2['masks'] = full_masks
 
-    from rfdetr.datasets.visualize import render_detection
-    from trainer import image_utils, vtk_utils
-    colors = vtk_utils.get_teeth_color_table(normalize=False)
-    colors[0, :] = 0
-    display_image = image_utils.to_magnitude_images(img)
-    color2, mask2 = render_detection(
-        display_image, inst2['boxes'], inst2['fdi'], colors, masks=inst2['masks'],
-        drawing_mode=drawing_mode, with_source_concat=with_source_concat,
-    )
+    from trainer import image_utils
+    # 2차는 이미 crop 해상도로 전체 렌더링(contour/label)을 끝냈다(color2_crop). 이걸 버리고
+    # 원본 전체 해상도에서 render_detection을 다시 부르는 대신(findContours/polylines는
+    # box-restriction이 적용 안 돼 여전히 캔버스 전체 크기 배열을 스캔하므로 그 비용이 고스란히
+    # 남는다 -- 실측 75ms, `rfdetr/deploy/profile_two_pass_stages.py`), 이미 그려진 crop 패치를
+    # 원본 캔버스의 같은 위치에 그대로 붙여넣는다(픽셀 좌표계가 동일해 그대로 대입 가능).
+    raw_image = image_utils.to_magnitude_images(img)
+    display_image = raw_image.copy()
+    display_image[y0i:y1i, x0i:x1i] = color2_crop
+    mask2 = np.zeros((h, w), dtype=mask2_crop.dtype)
+    mask2[y0i:y1i, x0i:x1i] = mask2_crop
+    color2 = display_image
+    if with_source_concat:
+        color2 = np.concatenate([raw_image, display_image], axis=1)
     return color2, mask2, inst2, True, crop_box
 
 
@@ -955,9 +1019,10 @@ def predict_wrapper(img, model=None, drawing_mode='polygon',
                     apply_clahe_enhance=False,
                     clahe_clip_limit=DEFAULT_PREDICT_CLAHE_CLIP_LIMIT,
                     clahe_tile_grid=DEFAULT_PREDICT_CLAHE_TILE_GRID,
-                    two_pass=False,
+                    two_pass=True,
                     roi_margin=DEFAULT_TWO_PASS_ROI_MARGIN,
                     roi_shrink_ratio=DEFAULT_TWO_PASS_SHRINK_RATIO,
+                    min_scale_gain=DEFAULT_TWO_PASS_MIN_SCALE_GAIN,
                     pass2_confidence_threshold=DEFAULT_TWO_PASS_PASS2_CONFIDENCE_THRESHOLD,
                     return_two_pass_info=False):
     """Run one image while preserving the legacy two-value return by default.
@@ -977,9 +1042,12 @@ def predict_wrapper(img, model=None, drawing_mode='polygon',
     for the matching training-time augmentation).
 
     two_pass: see ``two_pass_predict`` -- 1차 전체 이미지 추론 후 1차 검출 bbox 기준
-    teeth_roi 영역만 고해상도로 재추론한다. peri류처럼 crop이 거의 줄지 않으면 자동으로
-    1-pass로 끝난다 (roi_shrink_ratio). export(torch.jit) 모델에는 적용하지 않는다
-    (고정 입력 크기라 가변 crop을 다시 letterbox할 수 없음).
+    teeth_roi 영역만 고해상도로 재추론한다 (기본 활성 -- cbct_pano/seoul_pano 양쪽 다
+    one-pass보다 우위이거나 트레이드오프 수준인 것을 export 기준으로 확인,
+    `docs/todolist.md` 참고). peri류처럼 crop해도 유효 해상도 이득이 없으면(``min_scale_gain``)
+    또는 crop이 거의 줄지 않으면(``roi_shrink_ratio``) 자동으로 1-pass로 끝난다.
+    export(torch.jit) 모델에는 적용하지 않는다 (고정 입력 크기라 가변 crop을 다시 letterbox할
+    수 없음).
     """
     if model is None:
         model = init_and_get_model(export=False, use_ema=True)
@@ -1004,7 +1072,8 @@ def predict_wrapper(img, model=None, drawing_mode='polygon',
         else:
             color_image, mask_image, instance_result, used_two_pass, crop_box = two_pass_predict(
                 img, model, drawing_mode=drawing_mode, roi_margin=roi_margin,
-                roi_shrink_ratio=roi_shrink_ratio, convert_options=convert_options,
+                roi_shrink_ratio=roi_shrink_ratio, min_scale_gain=min_scale_gain,
+                convert_options=convert_options,
                 pass2_confidence_threshold=pass2_confidence_threshold)
             if return_instance_results:
                 if return_two_pass_info:
@@ -1227,11 +1296,12 @@ if __name__ == '__main__':
         '--two-pass', '--two_pass',
         dest='two_pass',
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help='1차 전체 이미지 추론 후, 1차 검출 치아 bbox 기준 teeth_roi 영역만 고해상도로 '
-             '재추론 (two_pass_predict 참고). periapical/peri류처럼 치아가 이미 프레임 대부분을 '
-             '차지하는 입력은 crop이 거의 줄지 않아 --roi-shrink-ratio 조건에 의해 자동으로 '
-             '1-pass로 끝난다 (export 모델에는 적용되지 않음).',
+             '재추론 (two_pass_predict 참고, 기본 활성). periapical/peri류처럼 치아가 이미 '
+             '프레임 대부분을 차지하는 입력은 crop이 거의 줄지 않거나(--roi-shrink-ratio) 줄어도 '
+             '유효 해상도 이득이 없으면(--min-scale-gain) 자동으로 1-pass로 끝난다 (export '
+             '모델에는 적용되지 않음).',
     )
     parser.add_argument(
         '--roi-margin', '--roi_margin',
@@ -1247,6 +1317,15 @@ if __name__ == '__main__':
         default=DEFAULT_TWO_PASS_SHRINK_RATIO,
         help='--two-pass 2차 crop 면적이 원본 면적 대비 이 비율 이상이면("거의 안 줄어들면") '
              f'2차를 생략하고 1-pass로 끝낸다 (기본 {DEFAULT_TWO_PASS_SHRINK_RATIO}).',
+    )
+    parser.add_argument(
+        '--min-scale-gain', '--min_scale_gain',
+        dest='min_scale_gain',
+        type=float,
+        default=DEFAULT_TWO_PASS_MIN_SCALE_GAIN,
+        help='--two-pass 2차 crop이 1차 대비 유효 해상도를 이 배수 이상 올려주지 않으면 2차를 '
+             f'생략하고 1-pass로 끝낸다 (기본 {DEFAULT_TWO_PASS_MIN_SCALE_GAIN}, '
+             'rfdetr/deploy/scale_gain_stats.py 실측 참고 -- peri류 자동 제외용).',
     )
     parser.add_argument(
         '--pass2-confidence-threshold', '--pass2_confidence_threshold',

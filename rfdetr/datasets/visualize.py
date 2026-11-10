@@ -20,6 +20,48 @@ import argparse
 import os
 
 import numpy as np
+from numba import njit
+
+
+@njit(cache=True)
+def _merge_label_image_kernel(masks, boxes, labels, out):
+    """Per-instance label merge restricted to each instance's own box region,
+    instead of scanning the full (N, H, W) canvas -- masks are already False
+    outside their box (paste_masks_in_image only wrote inside it), so the
+    full-canvas scan was pure waste. Sequential over instances (not prange):
+    N is small (tens of teeth) and writes to `out` can overlap between
+    instances, so parallelizing would race."""
+    for k in range(masks.shape[0]):
+        x0, y0, x1, y1 = boxes[k, 0], boxes[k, 1], boxes[k, 2], boxes[k, 3]
+        lbl = labels[k]
+        for y in range(y0, y1):
+            for x in range(x0, x1):
+                if masks[k, y, x] and lbl > out[y, x]:
+                    out[y, x] = lbl
+
+
+def merge_label_image_by_numba(labels, masks, boxes_xy, image_shape):
+    """numba replacement for ``np.max(labels[:,None,None]*masks, axis=0)``:
+    only visits each instance's own box region (``boxes_xy``), not the full
+    image, since everywhere outside it is already False. See
+    rfdetr/deploy/profile_merge_label_image.py for the correctness/speed
+    comparison against the (now uint8-dtype-fixed) numpy version."""
+    h, w = image_shape
+    out = np.zeros((h, w), dtype=np.uint8)
+    if masks.shape[0] == 0:
+        return out.astype(labels.dtype)
+    boxes_np = np.asarray(boxes_xy, dtype=np.float64)
+    x0 = np.clip(np.floor(boxes_np[:, 0]), 0, w)
+    y0 = np.clip(np.floor(boxes_np[:, 1]), 0, h)
+    x1 = np.clip(np.ceil(boxes_np[:, 2]), 0, w)
+    y1 = np.clip(np.ceil(boxes_np[:, 3]), 0, h)
+    int_boxes = np.ascontiguousarray(
+        np.stack([x0, y0, x1, y1], axis=1).astype(np.int64)
+    )
+    labels_u8 = np.ascontiguousarray(labels.astype(np.uint8))
+    masks_arr = np.ascontiguousarray(masks)
+    _merge_label_image_kernel(masks_arr, int_boxes, labels_u8, out)
+    return out.astype(labels.dtype)
 
 
 def _draw_fdi_labels(image, boxes_xy, labels, font_scale=None):
@@ -47,6 +89,7 @@ def render_detection(
     labels,
     colors,
     masks=None,
+    mask_boxes_xy=None,
     drawing_mode='polygon',
     polygon_thickness=None,
     with_source_concat=False,
@@ -58,11 +101,20 @@ def render_detection(
 
     Args:
         image: ``(H, W, C)`` 배열. 이미 이 함수가 그릴 해상도로 리사이즈/크롭되어 있어야 한다.
-        boxes_xy: ``(N, 4)`` xyxy, ``image`` 픽셀 좌표계.
+        boxes_xy: ``(N, 4)`` xyxy, ``image`` 픽셀 좌표계. 그려지는 detection box -- segmentation이
+            쓰는 (보통 더 큰) crop box와는 다를 수 있으니 ``label_image`` 병합 경계로는 쓰지 않는다
+            (``mask_boxes_xy`` 참고).
         labels: ``(N,)`` int. ``colors``/``colors[label]``로 색상을 찾을 FDI(또는 클래스) id.
         colors: ``(num_colors, 3)`` 색상 테이블.
         masks: 선택. ``(N, H, W)`` bool/uint8 instance mask, ``image``와 같은 해상도로 이미
             복원되어 있어야 한다. ``None``이면 마스크를 그리지 않는다(= label_image도 None 반환).
+        mask_boxes_xy: 선택. ``(N, 4)`` xyxy, 각 인스턴스 마스크가 실제로 값을 가질 수 있는
+            (``paste_masks_in_image``가 썼던) 영역 -- 보통 ``boxes_xy``보다 크다
+            (``segmentation_crop_box_scale``만큼 확장된 crop box). 주어지면 label_image 병합을
+            이 영역으로만 제한해 전체 캔버스를 스캔하지 않는 numba 경로
+            (``merge_label_image_by_numba``)를 쓴다 -- ``None``이면(예: GT 시각화, 또는
+            segmentation_mode가 박스에 제한되지 않는 full_image일 때) 항상-정확한 전체 스캔으로
+            fallback한다.
         drawing_mode: ``'polygon'``(기본)은 인스턴스별 외곽선만 그려 인접 치아 중첩 영역이 보이게
             한다. ``'mask'``는 겹치는 영역을 큰 FDI 라벨로 병합해 블렌딩한다.
         polygon_thickness: ``'polygon'`` 모드 외곽선 두께. ``None``이면 영상 너비 기준 자동.
@@ -89,8 +141,25 @@ def render_detection(
     if masks is not None:
         if len(masks) == 0:
             label_image = np.zeros(image.shape[:2], dtype=np.int64)
+        elif mask_boxes_xy is not None:
+            # Masks are already False everywhere outside their own
+            # mask_boxes_xy region (paste_masks_in_image only wrote inside
+            # it) -- scan just that region per instance instead of the full
+            # (N, H, W) canvas. ~5.6x faster on a 28-tooth 1468x2988 image
+            # (rfdetr/deploy/profile_merge_label_image.py).
+            label_image = merge_label_image_by_numba(
+                labels, masks, mask_boxes_xy, image.shape[:2]
+            )
         else:
-            label_image = np.max(labels[:, None, None] * masks, axis=0)
+            # FDI labels are always <256 (max 48): multiplying in the original
+            # (int64) dtype allocates/scans one (N, H, W) int64 temp array per
+            # call -- ~977MB and ~175ms for a 28-tooth 1468x2988 image, the
+            # single largest cost in render_detection (measured via
+            # rfdetr/deploy/profile_render_bottleneck.py). uint8 keeps the same
+            # temp 8x smaller; cast back so the returned dtype is unchanged.
+            label_image = np.max(
+                labels.astype(np.uint8)[:, None, None] * masks, axis=0
+            ).astype(labels.dtype)
 
         if drawing_mode == 'polygon':
             # 치아별 외곽선을 따로 그려서 인접 치아 사이 중첩 영역이 보이게 한다 (채우지 않음)
