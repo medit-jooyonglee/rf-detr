@@ -23,6 +23,7 @@ import rfdetr.datasets.transforms as T
 from rfdetr.models import build_model
 from rfdetr import RFDETRBase, RFDETRNano, RFDETRSmall
 from rfdetr.datasets.xraypanoramic import apply_clahe
+from rfdetr.datasets.xray_crop_aug import teeth_roi_box_center_aware
 from trainer import torch_utils
 
 # 가볍고 빠른 CLAHE 기본값 (단일 cv2 CLAHE 호출). 학습 측 augmentation 범위(1.5~3.5)의 중간값 --
@@ -30,6 +31,23 @@ from trainer import torch_utils
 # 비활성(--clahe로 켜기): 기존 배포 체크포인트는 CLAHE 분포를 학습하지 않았으므로, 끄는 쪽이 안전한 기본값이다.
 DEFAULT_PREDICT_CLAHE_CLIP_LIMIT = 2.0
 DEFAULT_PREDICT_CLAHE_TILE_GRID = 8
+
+# two-pass 추론(two_pass_predict): 1차 전체 이미지 추론 -> teeth_roi_box_center_aware(11/21
+# 정중선을 원점으로 고정한 대칭 crop)로 2차 crop 영역 산출. eval_margin은
+# rfdetr/datasets/xray_crop_aug.py의 DEFAULT_TEETH_ROI['eval_margin']과 동일 규칙(치아 bbox
+# 합집합 크기 대비 각 변 여유 비율).
+DEFAULT_TWO_PASS_ROI_MARGIN = 0.08
+# 2차 crop 면적이 원본 면적의 이 비율 이상이면("거의 안 줄어들면") 2차를 생략하고 1차 결과를
+# 그대로 쓴다. periapical/peri류 입력은 이미 치아가 프레임을 거의 꽉 채워 crop이 거의 줄지
+# 않으므로, 별도 peri 판별(파일명/해상도) 없이 이 기준 하나로 two-pass가 pano에만 적용된다.
+DEFAULT_TWO_PASS_SHRINK_RATIO = 0.85
+# 2차(crop 후 재추론) confidence threshold. 1차/one-pass와 같은 score 공간이라도 crop으로
+# 전체 이미지 context(치아 전체 배치/위아래 기준점)가 사라지면서 confidence 캘리브레이션이
+# 달라져 1차의 0.5를 그대로 쓰면 멀쩡히 맞춘 치아가 threshold에 걸려 사라진다 (image_4 사례:
+# 정확히 맞춘 31/41번이 0.38/0.42로 탈락). cbct_pano+seoul_pano 82장 PR curve의 F1-최적점이
+# 0.338, dice 기준 sweep(rfdetr/deploy/debug_two_pass_center.py)도 0.5->0.3으로 낮출수록
+# 단조 개선 -- 두 독립 측정값 사이인 0.35를 기본값으로 쓴다.
+DEFAULT_TWO_PASS_PASS2_CONFIDENCE_THRESHOLD = 0.35
 
 from rfdetr.config import (
     RFDETRLargeConfig,
@@ -350,6 +368,10 @@ def main(*,
          clahe_tile_grid=DEFAULT_PREDICT_CLAHE_TILE_GRID,
          used_export=False,
          export_shape=EXPORT_FIX_SIZE,
+         two_pass=False,
+         roi_margin=DEFAULT_TWO_PASS_ROI_MARGIN,
+         roi_shrink_ratio=DEFAULT_TWO_PASS_SHRINK_RATIO,
+         pass2_confidence_threshold=DEFAULT_TWO_PASS_PASS2_CONFIDENCE_THRESHOLD,
          **kwargs):
     """used_export: pretrain_weights를 export된 libtorch(.pt) 모델로 보고 추론 (고정 입력 크기 letterbox)."""
     # FIXME: save_path
@@ -416,81 +438,92 @@ def main(*,
         img = image_utils.cv2_imread(file, flags=cv2.IMREAD_GRAYSCALE)
         if apply_clahe_enhance:
             img = apply_clahe(img, clip_limit=clahe_clip_limit, tile_grid=clahe_tile_grid)
-        rsz_img, input_content_box = resize_image(img, stride=64, target_width=input_width,
-                                                  resize_hw=export_resize_hw)
-        img2 = np.repeat(rsz_img[None], 3, axis=0) / 255.
 
-        img_tensor = torch_utils.data_convert(img2[None], **convert_options)
-
-        with torch.no_grad():
-            outputs = model(img_tensor)
-            if not isinstance(outputs, dict):
-                # export 모델은 (pred_boxes, pred_logits, pred_masks) tuple을 반환
-                outputs = dict(zip(('pred_boxes', 'pred_logits', 'pred_masks'), outputs))
-            # print(outputs.keys())
-            print(outputs['pred_logits'].shape, outputs['pred_boxes'].shape)
-            if 'pred_masks' in outputs:
-                print(outputs['pred_masks'].shape)
-        
-            try:
-                instance_results = [] if overlap_report or convert == 'labelme' else None
-                color_image, mask_iamge = draw_preditions_boxes(
-                    img_tensor, outputs, save=False, origin_size=img.shape[:2],
-                                        segmentation_mode='crop_and_resize',
+        try:
+            if two_pass and not used_export:
+                color_image0, mask_image0, instance_result0, used_two_pass, crop_box = two_pass_predict(
+                    img, model, drawing_mode=drawing_mode,
                     mask_probability_threshold=MASK_PROBABILITY_THRESHOLD,
-                    segmentation_crop_box_scale=1.15,
-                    with_source_concat=with_source_concat,
-                    paste_masks_at_original_size=True,
-                    input_content_box=input_content_box,
-                    drawing_mode=drawing_mode,
-                    polygon_thickness=polygon_thickness,
-                    instance_results=instance_results,
+                    segmentation_crop_box_scale=1.15, with_source_concat=with_source_concat,
+                    roi_margin=roi_margin, roi_shrink_ratio=roi_shrink_ratio,
+                    pass2_confidence_threshold=pass2_confidence_threshold,
+                    convert_options=convert_options,
                 )
+                print(f'two_pass={used_two_pass} crop_box={crop_box}')
+                color_image, mask_iamge = [color_image0], [mask_image0]
+                instance_results = [instance_result0]
+            else:
+                rsz_img, input_content_box = resize_image(img, stride=64, target_width=input_width,
+                                                          resize_hw=export_resize_hw)
+                img2 = np.repeat(rsz_img[None], 3, axis=0) / 255.
+                img_tensor = torch_utils.data_convert(img2[None], **convert_options)
+                with torch.no_grad():
+                    outputs = model(img_tensor)
+                    if not isinstance(outputs, dict):
+                        # export 모델은 (pred_boxes, pred_logits, pred_masks) tuple을 반환
+                        outputs = dict(zip(('pred_boxes', 'pred_logits', 'pred_masks'), outputs))
+                    # print(outputs.keys())
+                    print(outputs['pred_logits'].shape, outputs['pred_boxes'].shape)
+                    if 'pred_masks' in outputs:
+                        print(outputs['pred_masks'].shape)
 
-
-                assert len(mask_iamge) == 1, "Expected a single mask image."
-                savename = os.path.join(mask_save_dir, os.path.relpath(file, path))
-                os.makedirs(os.path.dirname(savename), exist_ok=True)
-                from trainer import image_utils
-                stem, ext = os.path.splitext(savename)
-                if convert == 'labelme':
-                    from rfdetr.util.detr2labelme import save_labelme_annotation
-
-                    source_path = Path(file).resolve()
-                    output_image_path = Path(savename).resolve()
-                    if source_path != output_image_path:
-                        shutil.copy2(source_path, output_image_path)
-                    labelme_path = save_labelme_annotation(
-                        f'{stem}.json',
-                        savename,
-                        instance_results[0],
-                        image_height=img.shape[0],
-                        image_width=img.shape[1],
-                        polygon_epsilon=polygon_epsilon,
+                    instance_results = [] if overlap_report or convert == 'labelme' else None
+                    color_image, mask_iamge = draw_preditions_boxes(
+                        img_tensor, outputs, save=False, origin_size=img.shape[:2],
+                                            segmentation_mode='crop_and_resize',
+                        mask_probability_threshold=MASK_PROBABILITY_THRESHOLD,
+                        segmentation_crop_box_scale=1.15,
+                        with_source_concat=with_source_concat,
+                        paste_masks_at_original_size=True,
+                        input_content_box=input_content_box,
+                        drawing_mode=drawing_mode,
+                        polygon_thickness=polygon_thickness,
+                        instance_results=instance_results,
                     )
-                    print(f"Saved Labelme annotation to: {labelme_path}")
-                else:
-                    mask_path = f'{stem}.png'
-                    image_utils.cv2_imwrite(mask_path, mask_iamge[0].astype(np.uint8))
-                    image_utils.cv2_imwrite(savename, color_image[0].astype(np.uint8)[..., ::-1])  # Convert RGB to BGR for saving with OpenCV
-                    print(f"Saved mask image to: {mask_path}")
-                processed_count += 1
 
-                if overlap_report:
-                    file_key = os.path.relpath(file, path)
-                    tooth_rows, pair_rows, overlap_map = compute_tooth_overlaps(
-                        instance_results[0], file_key=file_key
-                    )
-                    all_tooth_rows.extend(tooth_rows)
-                    all_pair_rows.extend(pair_rows)
-                    if overlap_map is not None:
-                        highlight = draw_overlap_highlight(color_image[0], overlap_map)
-                        stem, ext = os.path.splitext(savename)
-                        image_utils.cv2_imwrite(f'{stem}_overlap{ext}', highlight[..., ::-1])
+            assert len(mask_iamge) == 1, "Expected a single mask image."
+            savename = os.path.join(mask_save_dir, os.path.relpath(file, path))
+            os.makedirs(os.path.dirname(savename), exist_ok=True)
+            from trainer import image_utils
+            stem, ext = os.path.splitext(savename)
+            if convert == 'labelme':
+                from rfdetr.util.detr2labelme import save_labelme_annotation
 
-            except Exception as e:
-                print(e)
-                print('draw_preditions_boxes failed')
+                source_path = Path(file).resolve()
+                output_image_path = Path(savename).resolve()
+                if source_path != output_image_path:
+                    shutil.copy2(source_path, output_image_path)
+                labelme_path = save_labelme_annotation(
+                    f'{stem}.json',
+                    savename,
+                    instance_results[0],
+                    image_height=img.shape[0],
+                    image_width=img.shape[1],
+                    polygon_epsilon=polygon_epsilon,
+                )
+                print(f"Saved Labelme annotation to: {labelme_path}")
+            else:
+                mask_path = f'{stem}.png'
+                image_utils.cv2_imwrite(mask_path, mask_iamge[0].astype(np.uint8))
+                image_utils.cv2_imwrite(savename, color_image[0].astype(np.uint8)[..., ::-1])  # Convert RGB to BGR for saving with OpenCV
+                print(f"Saved mask image to: {mask_path}")
+            processed_count += 1
+
+            if overlap_report:
+                file_key = os.path.relpath(file, path)
+                tooth_rows, pair_rows, overlap_map = compute_tooth_overlaps(
+                    instance_results[0], file_key=file_key
+                )
+                all_tooth_rows.extend(tooth_rows)
+                all_pair_rows.extend(pair_rows)
+                if overlap_map is not None:
+                    highlight = draw_overlap_highlight(color_image[0], overlap_map)
+                    stem, ext = os.path.splitext(savename)
+                    image_utils.cv2_imwrite(f'{stem}_overlap{ext}', highlight[..., ::-1])
+
+        except Exception as e:
+            print(e)
+            print('draw_preditions_boxes failed')
     if overlap_report:
         write_overlap_report(all_tooth_rows, all_pair_rows, mask_save_dir, processed_count)
     
@@ -788,12 +821,145 @@ def inference_libtorch_model_main():
         
 
 
+def _predict_single_pass(img, model, convert_options, drawing_mode='polygon',
+                          mask_probability_threshold=MASK_PROBABILITY_THRESHOLD,
+                          segmentation_crop_box_scale=1.15, with_source_concat=False,
+                          fdi_refinement=True, resize_hw=None, confidence_threshold=0.5):
+    """img(전체 또는 crop) 1회 추론 + draw_preditions_boxes. img 자신의 해상도를 기준으로
+    (color_image, mask_image, instance_result)를 반환한다 (batch 차원은 이미 벗겨져 있음).
+    two_pass_predict()의 1차/2차 호출과 predict_wrapper()의 one-pass 경로가 공유한다."""
+    rsz_img, content_box = resize_image(img, stride=64, resize_hw=resize_hw)
+    img2 = np.repeat(rsz_img[None], 3, axis=0) / 255.
+    img_tensor = torch_utils.data_convert(img2[None], **convert_options)
+
+    with torch.no_grad():
+        outputs = model(img_tensor)
+        if isinstance(outputs, dict):
+            pass
+        else:
+            bboxes, logits, masks = outputs
+            outputs = {'pred_boxes': bboxes, 'pred_logits': logits, 'pred_masks': masks}
+        print(outputs['pred_logits'].shape, outputs['pred_boxes'].shape)
+        if 'pred_masks' in outputs:
+            print(outputs['pred_masks'].shape)
+
+        instance_results = []
+        color_image, mask_image = draw_preditions_boxes(
+            img_tensor, outputs, save=False, origin_size=img.shape[:2],
+            segmentation_mode='crop_and_resize',
+            mask_probability_threshold=mask_probability_threshold,
+            segmentation_crop_box_scale=segmentation_crop_box_scale,
+            with_source_concat=with_source_concat,
+            paste_masks_at_original_size=True,
+            input_content_box=content_box,
+            drawing_mode=drawing_mode,
+            instance_results=instance_results,
+            fdi_refinement=fdi_refinement,
+            confidence_threshold=confidence_threshold,
+        )
+    return color_image[0], mask_image[0], instance_results[0]
+
+
+def two_pass_predict(img, model, drawing_mode='polygon',
+                      mask_probability_threshold=MASK_PROBABILITY_THRESHOLD,
+                      segmentation_crop_box_scale=1.15, with_source_concat=False,
+                      fdi_refinement=True, roi_margin=DEFAULT_TWO_PASS_ROI_MARGIN,
+                      roi_shrink_ratio=DEFAULT_TWO_PASS_SHRINK_RATIO, convert_options=None,
+                      pass1_confidence_threshold=0.5,
+                      pass2_confidence_threshold=DEFAULT_TWO_PASS_PASS2_CONFIDENCE_THRESHOLD):
+    """1차: 전체 이미지 추론. 1차에서 검출된 치아 bbox로
+    (``rfdetr.datasets.xray_crop_aug.teeth_roi_box_center_aware``, 11/21 정중선을 원점으로 고정한
+    대칭 crop -- 학습 때 teeth_roi eval crop의 추론 전용 변형) 2차 crop 영역을 구하고, 그 영역만
+    다시 letterbox해 고해상도로 재추론한다 (넓은 panoramic 전체를 640폭으로 욱여넣는 대신 치아
+    영역만 640폭으로 키우므로 치아당 유효 입력 해상도가 올라간다).
+
+    **peri 이미지와의 구분(예외처리)**: 이미 periapical/peri류처럼 치아가 프레임 대부분을
+    차지하는 입력은 1차 bbox 합집합이 원본과 거의 같아서 crop이 "거의 줄지 않는다". crop 면적이
+    원본 면적의 ``roi_shrink_ratio``(기본 0.85) 이상이면 2차를 생략하고 1차 결과를 그대로
+    반환한다 -- 파일명/해상도 기반 peri 판별 로직 없이, crop이 실제로 줄어드는지만으로 자연스럽게
+    pano에만 2차가 적용된다.
+
+    **pass1/pass2 confidence threshold를 분리한 이유**: crop으로 전체 이미지 context(치아 전체
+    배치, 상/하악 판단 기준점)가 사라지면서 2차의 confidence 캘리브레이션이 1차와 달라진다. 같은
+    0.5를 2차에도 쓰면 정확히 맞춘 치아가 threshold에 걸려 사라지는 사례가 실측됐다
+    (rfdetr/deploy/debug_two_pass_roi.py의 image_4 사례: 31/41번이 0.38/0.42로 정답을 내고도
+    탈락). cbct_pano+seoul_pano 82장 PR curve의 F1-최적 threshold도 1차 ~0.42, 2차 ~0.34로
+    서로 다르게 나온다 (rfdetr/deploy/pr_curve_two_pass.py).
+
+    Returns:
+        (color_image, mask_image, instance_result, used_two_pass, crop_box). ``crop_box``는
+        ``(x0, y0, x1, y1)`` 원본 좌표 -- 2차를 실행했을 때만 유효한 crop, 생략됐으면 참고용으로
+        계산된(미사용) crop 또는 None.
+    """
+    h, w = img.shape[:2]
+    if convert_options is None:
+        model_parameter = next(model.parameters(), None)
+        convert_options = ({'device': model_parameter.device, 'dtype': model_parameter.dtype}
+                            if model_parameter is not None else {})
+
+    color1, mask1, inst1 = _predict_single_pass(
+        img, model, convert_options, drawing_mode=drawing_mode,
+        mask_probability_threshold=mask_probability_threshold,
+        segmentation_crop_box_scale=segmentation_crop_box_scale,
+        with_source_concat=with_source_concat, fdi_refinement=fdi_refinement,
+        confidence_threshold=pass1_confidence_threshold)
+
+    if inst1['boxes'].shape[0] == 0:
+        return color1, mask1, inst1, False, None
+
+    crop_box = teeth_roi_box_center_aware(inst1['boxes'], inst1['fdi'], (h, w),
+                                          cfg={'eval_margin': roi_margin})
+    if crop_box is None:
+        return color1, mask1, inst1, False, None
+
+    x0, y0, x1, y1 = crop_box
+    x0i, y0i = max(0, int(np.floor(x0))), max(0, int(np.floor(y0)))
+    x1i, y1i = min(w, int(np.ceil(x1))), min(h, int(np.ceil(y1)))
+    crop_w, crop_h = x1i - x0i, y1i - y0i
+    if crop_w <= 0 or crop_h <= 0 or crop_w * crop_h >= roi_shrink_ratio * w * h:
+        # crop이 원본 대비 거의 줄지 않음 (peri류로 이미 꽉 차 있음) -> 2차 생략, 1-pass로 종료
+        return color1, mask1, inst1, False, crop_box
+
+    crop_img = img[y0i:y1i, x0i:x1i]
+    _, _, inst2 = _predict_single_pass(
+        crop_img, model, convert_options, drawing_mode=drawing_mode,
+        mask_probability_threshold=mask_probability_threshold,
+        segmentation_crop_box_scale=segmentation_crop_box_scale,
+        with_source_concat=False, fdi_refinement=fdi_refinement,
+        confidence_threshold=pass2_confidence_threshold)
+
+    # crop-local 좌표 -> 원본 좌표로 평행이동 (각주: 2차 결과가 1차를 완전히 대체한다. 1차에서
+    # 검출된 치아는 teeth_roi_box_center_aware 구성상 margin 포함 crop 안에 항상 들어있지만,
+    # 2차 자체가 crop 경계에서 치아를 놓치거나 새로 찾는 경우는 보정하지 않는다).
+    offset = np.array([x0i, y0i, x0i, y0i], dtype=inst2['boxes'].dtype)
+    inst2['boxes'] = inst2['boxes'] + offset
+    full_masks = np.zeros((inst2['masks'].shape[0], h, w), dtype=bool)
+    full_masks[:, y0i:y1i, x0i:x1i] = inst2['masks']
+    inst2['masks'] = full_masks
+
+    from rfdetr.datasets.visualize import render_detection
+    from trainer import image_utils, vtk_utils
+    colors = vtk_utils.get_teeth_color_table(normalize=False)
+    colors[0, :] = 0
+    display_image = image_utils.to_magnitude_images(img)
+    color2, mask2 = render_detection(
+        display_image, inst2['boxes'], inst2['fdi'], colors, masks=inst2['masks'],
+        drawing_mode=drawing_mode, with_source_concat=with_source_concat,
+    )
+    return color2, mask2, inst2, True, crop_box
+
+
 def predict_wrapper(img, model=None, drawing_mode='polygon',
                     return_instance_results=False,
                     render=True,
                     apply_clahe_enhance=False,
                     clahe_clip_limit=DEFAULT_PREDICT_CLAHE_CLIP_LIMIT,
-                    clahe_tile_grid=DEFAULT_PREDICT_CLAHE_TILE_GRID):
+                    clahe_tile_grid=DEFAULT_PREDICT_CLAHE_TILE_GRID,
+                    two_pass=False,
+                    roi_margin=DEFAULT_TWO_PASS_ROI_MARGIN,
+                    roi_shrink_ratio=DEFAULT_TWO_PASS_SHRINK_RATIO,
+                    pass2_confidence_threshold=DEFAULT_TWO_PASS_PASS2_CONFIDENCE_THRESHOLD,
+                    return_two_pass_info=False):
     """Run one image while preserving the legacy two-value return by default.
 
     When ``return_instance_results`` is true, a third value is returned with
@@ -809,6 +975,11 @@ def predict_wrapper(img, model=None, drawing_mode='polygon',
     inference (default off -- existing deployed checkpoints were not trained
     with CLAHE'd inputs; see rfdetr/datasets/xraypanoramic.py DEFAULT_CONTRAST_AUG_CFG
     for the matching training-time augmentation).
+
+    two_pass: see ``two_pass_predict`` -- 1차 전체 이미지 추론 후 1차 검출 bbox 기준
+    teeth_roi 영역만 고해상도로 재추론한다. peri류처럼 crop이 거의 줄지 않으면 자동으로
+    1-pass로 끝난다 (roi_shrink_ratio). export(torch.jit) 모델에는 적용하지 않는다
+    (고정 입력 크기라 가변 crop을 다시 letterbox할 수 없음).
     """
     if model is None:
         model = init_and_get_model(export=False, use_ema=True)
@@ -817,12 +988,6 @@ def predict_wrapper(img, model=None, drawing_mode='polygon',
         img = img[..., 0]
     if apply_clahe_enhance:
         img = apply_clahe(img, clip_limit=clahe_clip_limit, tile_grid=clahe_tile_grid)
-    if isinstance(model, torch.jit.ScriptModule):
-        # export model
-        rsz_img, input_content_box = resize_image(img, stride=64, resize_hw=EXPORT_FIX_SIZE)
-    else:
-        rsz_img, input_content_box = resize_image(img, stride=64)
-    img2 = np.repeat(rsz_img[None], 3, axis=0) / 255.
 
     model_parameter = next(model.parameters(), None)
     convert_options = {}
@@ -831,8 +996,31 @@ def predict_wrapper(img, model=None, drawing_mode='polygon',
             'device': model_parameter.device,
             'dtype': model_parameter.dtype,
         }
+
+    if two_pass:
+        if isinstance(model, torch.jit.ScriptModule):
+            print('[warning] two_pass is not supported for exported (torch.jit) models; '
+                  'falling back to one-pass.')
+        else:
+            color_image, mask_image, instance_result, used_two_pass, crop_box = two_pass_predict(
+                img, model, drawing_mode=drawing_mode, roi_margin=roi_margin,
+                roi_shrink_ratio=roi_shrink_ratio, convert_options=convert_options,
+                pass2_confidence_threshold=pass2_confidence_threshold)
+            if return_instance_results:
+                if return_two_pass_info:
+                    return color_image, mask_image, instance_result, dict(
+                        used_two_pass=used_two_pass, crop_box=crop_box)
+                return color_image, mask_image, instance_result
+            return color_image, mask_image
+
+    if isinstance(model, torch.jit.ScriptModule):
+        # export model
+        rsz_img, input_content_box = resize_image(img, stride=64, resize_hw=EXPORT_FIX_SIZE)
+    else:
+        rsz_img, input_content_box = resize_image(img, stride=64)
+    img2 = np.repeat(rsz_img[None], 3, axis=0) / 255.
     img_tensor = torch_utils.data_convert(img2[None], **convert_options)
-    
+
     with torch.no_grad():
         outputs = model(img_tensor)
         # protocol export model or vanila modell, vanila model return dict, export model return tuple
@@ -849,7 +1037,7 @@ def predict_wrapper(img, model=None, drawing_mode='polygon',
         print(outputs['pred_logits'].shape, outputs['pred_boxes'].shape)
         if 'pred_masks' in outputs:
             print(outputs['pred_masks'].shape)
-    
+
         instance_results = [] if return_instance_results else None
         # try:
         color_image, mask_iamge = draw_preditions_boxes(
@@ -864,7 +1052,7 @@ def predict_wrapper(img, model=None, drawing_mode='polygon',
             instance_results=instance_results,
             render=render,
         )
-            
+
     if return_instance_results:
         return color_image[0], mask_iamge[0], instance_results[0]
     return color_image[0], mask_iamge[0]
@@ -1034,6 +1222,40 @@ if __name__ == '__main__':
         type=int,
         default=DEFAULT_PREDICT_CLAHE_TILE_GRID,
         help=f'--clahe 사용 시 CLAHE tileGridSize (정사각형, 기본 {DEFAULT_PREDICT_CLAHE_TILE_GRID}).',
+    )
+    parser.add_argument(
+        '--two-pass', '--two_pass',
+        dest='two_pass',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='1차 전체 이미지 추론 후, 1차 검출 치아 bbox 기준 teeth_roi 영역만 고해상도로 '
+             '재추론 (two_pass_predict 참고). periapical/peri류처럼 치아가 이미 프레임 대부분을 '
+             '차지하는 입력은 crop이 거의 줄지 않아 --roi-shrink-ratio 조건에 의해 자동으로 '
+             '1-pass로 끝난다 (export 모델에는 적용되지 않음).',
+    )
+    parser.add_argument(
+        '--roi-margin', '--roi_margin',
+        dest='roi_margin',
+        type=float,
+        default=DEFAULT_TWO_PASS_ROI_MARGIN,
+        help=f'--two-pass 2차 crop 여유 비율, 치아 bbox 합집합 크기 대비 (기본 {DEFAULT_TWO_PASS_ROI_MARGIN}).',
+    )
+    parser.add_argument(
+        '--roi-shrink-ratio', '--roi_shrink_ratio',
+        dest='roi_shrink_ratio',
+        type=float,
+        default=DEFAULT_TWO_PASS_SHRINK_RATIO,
+        help='--two-pass 2차 crop 면적이 원본 면적 대비 이 비율 이상이면("거의 안 줄어들면") '
+             f'2차를 생략하고 1-pass로 끝낸다 (기본 {DEFAULT_TWO_PASS_SHRINK_RATIO}).',
+    )
+    parser.add_argument(
+        '--pass2-confidence-threshold', '--pass2_confidence_threshold',
+        dest='pass2_confidence_threshold',
+        type=float,
+        default=DEFAULT_TWO_PASS_PASS2_CONFIDENCE_THRESHOLD,
+        help='--two-pass 2차(crop 후 재추론) confidence threshold. crop으로 context가 사라지며 '
+             f'1차(0.5 고정)보다 캘리브레이션이 달라져 기본값을 낮게 둠 (기본 '
+             f'{DEFAULT_TWO_PASS_PASS2_CONFIDENCE_THRESHOLD}, PR curve F1-최적점 참고).',
     )
     cli_args = parser.parse_args()
     if cli_args.export:

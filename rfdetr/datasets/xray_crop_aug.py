@@ -231,6 +231,42 @@ def teeth_roi_box(boxes_xyxy: np.ndarray, img_hw: Tuple[int, int], rng: Optional
     return _clip_box(box, img_hw)
 
 
+def teeth_roi_box_center_aware(boxes_xyxy: np.ndarray, fdi_labels: np.ndarray, img_hw: Tuple[int, int],
+                               cfg: Optional[Dict] = None):
+    """``teeth_roi_box(..., train=False)``의 추론 전용 변형.
+
+    1차 검출이 한쪽 구치부를 통째로 놓치면 bbox 합집합(teeth_roi_box)의 x-center가 그쪽으로
+    쏠려 crop 자체가 좌우 비대칭이 되고, 2차 추론이 학습 분포(치아가 정중선 기준 좌우 대칭)에서
+    벗어나 불안정해진다 (FDI 오분류/탐지 실패 증가 -- rfdetr/deploy/debug_two_pass_center.py
+    실험으로 cbct_pano/seoul_pano 82장에서 확인: dice/iou/boundary_f1/contact_f1 전부 개선,
+    특히 seoul_pano dice 0.7864->0.8040).
+
+    11/21(상악 중절치, 정중선 경계)을 x 원점으로 고정하고, 원점 기준 좌/우 중 더 넓은 쪽 폭으로
+    대칭 crop을 구성해 이 쏠림을 줄인다. 11/21을 둘 다 못 찾았으면 bbox 합집합 중심으로 폴백
+    (이 경우 비대칭 crop을 그대로 허용한다는 점에서 ``teeth_roi_box``와 동일)."""
+    cfg = {**DEFAULT_TEETH_ROI, **(cfg or {})}
+    boxes_xyxy = np.asarray(boxes_xyxy, dtype=np.float64).reshape(-1, 4)
+    if len(boxes_xyxy) == 0:
+        return None
+    fdi_labels = np.asarray(fdi_labels).reshape(-1)
+    x0u, y0u = boxes_xyxy[:, 0].min(), boxes_xyxy[:, 1].min()
+    x1u, y1u = boxes_xyxy[:, 2].max(), boxes_xyxy[:, 3].max()
+    has11, has21 = (fdi_labels == 11), (fdi_labels == 21)
+    if has11.any() and has21.any():
+        cx = (boxes_xyxy[has11][0, [0, 2]].mean() + boxes_xyxy[has21][0, [0, 2]].mean()) / 2
+    elif has11.any():
+        cx = boxes_xyxy[has11][0, 0]
+    elif has21.any():
+        cx = boxes_xyxy[has21][0, 2]
+    else:
+        cx = (x0u + x1u) / 2
+    half_w = max(cx - x0u, x1u - cx)
+    bw, bh = x1u - x0u, y1u - y0u
+    m = cfg['eval_margin']
+    box = [cx - half_w - bw * m, y0u - bh * m, cx + half_w + bw * m, y1u + bh * m]
+    return _clip_box(box, img_hw)
+
+
 def corner_mask(h: int, w: int, style: str = 'chamfer', ratio: float = 0.1) -> np.ndarray:
     """PA 영상 외곽 마스크 (1: 영상, 0: 잘린 모서리). style: 'chamfer' | 'round'."""
     mask = np.ones((h, w), dtype=np.uint8)

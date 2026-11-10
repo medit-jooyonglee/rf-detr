@@ -447,6 +447,7 @@ def draw_preditions_boxes(
     fdi_refinement=True,
     draw_labels=True,
     label_font_scale=None,
+    confidence_threshold=0.5,
     render=True,
     **kwargs
 ):
@@ -479,6 +480,9 @@ def draw_preditions_boxes(
         draw_labels: Default True. Draws the FDI number above each box.
         label_font_scale: ``cv2.putText`` fontScale for the FDI number. ``None``
             auto-scales with the render width.
+        confidence_threshold: NMS 이전 post-NMS score 하한 (``pred_scores > confidence_threshold``
+            인 쿼리만 남긴다). 기본 0.5. 치아 32-class라 0.5가 과도하게 엄격할 수 있어 two-pass
+            2차 등에서 별도로 낮춰 평가해볼 수 있게 매개변수화함.
     """
     if drawing_mode not in ('mask', 'polygon'):
         raise ValueError(f"drawing_mode must be 'mask' or 'polygon', got {drawing_mode!r}")
@@ -511,6 +515,7 @@ def draw_preditions_boxes(
                 polygon_thickness=polygon_thickness, instance_results=instance_results,
                 fdi_refinement=fdi_refinement,
                 draw_labels=draw_labels, label_font_scale=label_font_scale,
+                confidence_threshold=confidence_threshold,
                 render=render,
                 **kwargs,
             )
@@ -594,7 +599,6 @@ def draw_preditions_boxes(
     pred_scores = np.max(probs, axis=-1)
     pred_label = np.argmax(probs, axis=-1)
 
-    confidence_threshold = 0.5
     selected_query_indices = None
     if nms_refinement:
         selected_query_indices = []
