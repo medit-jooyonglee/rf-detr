@@ -394,11 +394,11 @@ python -m rfdetr.cli.main \
 ~~~
 
 
-##  데이터셋으로 crop 모드로 evaluatation 별도 수행
+##  데이터셋으로 crop 모드로 evaluatation 별도 수행(natual-teeth)
 
 
-~~~
-
+~~~bash
+# crop 모드 학습
 python -m rfdetr.cli.main \
   --pretrain_weights outputs/fine_tune_pa_teeth_roi_padding_fixed/checkpoint_best_regular.pth \
   --xray_crop_mode periapical teeth_roi \
@@ -408,14 +408,58 @@ python -m rfdetr.cli.main \
   --eval \
   --eval_save \
   --eval_xray_crop
-  
-~~~
 
-
+# natual teeth predict
 $env:PYTHONPATH = "."
 python rfdetr/deploy/predict_teeth.py --face-crop `
   --test-path E:/dataset/smile_design/flux2/faces `
   --save-dir E:/dataset/smile_design/flux2/faces `
   --pretrain_weights outputs/teeth/checkpoint_best_ema.pth `
   --input_width 256 --segmentation_crop_size 64 48 `
+  --convert labelme
+
+~~~
+
+## 배포 추론
+
+~~~powershell
+### 배포 추론 & labelme 데이터 변환 & drawing이미지 저장
+python -m rfdetr.deploy.predict `
+  --pretrain-weights "outputs/pretrained/segmentation/xray_teeth_seg/peri_data_fusion_1106_ce/checkpoint_best_ema.pth" `
+  --test-path "E:/temp/temp_xrays" `
+  --save-dir "E:/temp/temp_xrays_outputs" `
+  --convert labelme `
+  --save-drawing `
+  --drawing-mode polygon `
+  --two-pass
+
+#  base_test_path 기준으로 하위 폴더 구조를 유지하며 Labelme JSON + 오버레이(_vis) 동시 저장
+python -m rfdetr.deploy.predict `
+  --pretrain-weights "outputs/pretrained/segmentation/xray_teeth_seg/peri_data_fusion_1106_ce/checkpoint_best_ema.pth" `
+  --base-test-path "<상위_루트_경로>" `
+  --test-path "<상위_루트_경로/하위_추론대상_폴더>" `
+  --save-dir "<결과_저장_루트_경로>" `
+  --convert labelme
+
+
+#  Labelme JSON은 원본(또는 --save-dir)에 저장하고, 오버레이 이미지는 별도 폴더에 하위 구조를 유지하며 모으고 싶을 때, min-rowolution으로 필터링 처ㅇ리
+python -m rfdetr.deploy.predict `
+  --pretrain-weights "outputs/pretrained/segmentation/xray_teeth_seg/peri_data_fusion_1106_ce/checkpoint_best_ema.pth" `
+  --base-test-path "<상위_루트_경로>" `
+  --test-path "<상위_루트_경로/하위_추론대상_폴더>" `
+  --save-dir "<labelme_저장_루트_경로>" `
+  --drawing-save-dir "<오버레이_이미지만_모을_루트_경로>" `
+  --min-resol 1000 1000 ` 
+  --convert labelme
+~~~
+
+
+python -m rfdetr.deploy.predict `
+  --pretrain-weights "outputs/pretrained/segmentation/xray_teeth_seg/peri_data_fusion_1106_ce/checkpoint_best_ema.pth" `
+  --base-test-path "E:/temp/temp_xrays" `
+  --test-path "E:/temp/temp_xrays/small_image_test" `
+  "E:/temp/temp_xrays/my_tttest" `
+  "E:/temp/temp_xrays/test_folder" `
+  --save-dir "E:/temp/temp_xrays_outputs" `
+  --min-resol 1000 1000 `
   --convert labelme

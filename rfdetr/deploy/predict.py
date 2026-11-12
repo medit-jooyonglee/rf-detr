@@ -87,8 +87,35 @@ def is_inference_filename_excluded(file_path):
         for keyword in TEMP_EXCLUDED_FILENAME_KEYWORDS
     )
 
-def get_target_image_size(image_shape, rererence_width: int = 640):
-    """Scale the longer side to the requested size while preserving ratio."""
+
+def get_image_size_pil(file_path):
+    """PIL로 헤더만 읽어 (height, width) 반환. 픽셀 디코딩 없이 빠르게 해상도만 확인."""
+    with Image.open(file_path) as img:
+        width, height = img.size
+    return height, width
+
+
+def is_resolution_excluded(file_path, max_resolution=None, min_resolution=None):
+    """max_resolution=(H, W) 초과 또는 min_resolution=(H, W) 미만인 이미지인지 PIL 헤더로 빠르게 확인.
+    둘 다 None이면 해상도 필터를 전혀 수행하지 않는다."""
+    if max_resolution is None and min_resolution is None:
+        return False
+    try:
+        h, w = get_image_size_pil(file_path)
+    except Exception as e:
+        print(f'[warning] 이미지 크기 확인 실패, 해상도 필터 건너뜀: {file_path} ({e})')
+        return False
+    if max_resolution is not None:
+        max_h, max_w = max_resolution
+        if h > max_h or w > max_w:
+            return True
+    if min_resolution is not None:
+        min_h, min_w = min_resolution
+        if h < min_h or w < min_w:
+            return True
+    return False
+
+def get_target_image_size(image_shape, rererence_width:int = 640):
     ih, iw = image_shape[:2]
     if ih <= 0 or iw <= 0 or rererence_width <= 0:
         raise ValueError("image dimensions and input size must be positive")
@@ -359,12 +386,27 @@ def load_export_model(model_path, device='cuda', export_shape=EXPORT_FIX_SIZE):
     return model, tuple(int(v) for v in export_shape)
 
 
+def mask_output_path(savename):
+    """label mask 저장 경로. 원본이 png면 렌더 이미지와 이름이 겹치므로 _mask 접미사."""
+    stem, ext = os.path.splitext(savename)
+    return f'{stem}_mask.png' if ext.lower() == '.png' else f'{stem}.png'
+
+
 def main(*,
          use_ema=True, with_source_concat=False,
          test_path='',
-         save_dir = 'temp/resultsxray',
+         base_test_path=None,
+         include_dirs=None,
+         max_resolution=None,
+         min_resolution=None,
+         overwrite=False,
+         save_dir = None,
+         save_drawing=True,
+         drawing_save_dir=None,
          drawing_mode='polygon',
          polygon_thickness=None,
+         draw_labels=True,
+         label_font_scale=None,
          overlap_report=None,
          max_images=None,
          convert=None,
@@ -395,6 +437,31 @@ def main(*,
         drawing_mode = 'polygon'
         if overlap_report is None:
             overlap_report = False
+    if isinstance(test_path, (list, tuple)):
+        test_paths = [os.fspath(p) for p in test_path if p]
+    elif test_path:
+        test_paths = [os.fspath(test_path)]
+    else:
+        test_paths = ['']
+
+    raw_save_dir = save_dir
+    if not save_dir:
+        if convert == 'labelme':
+            if base_test_path:
+                save_dir = base_test_path
+            elif len(test_paths) == 1:
+                save_dir = test_paths[0]
+            else:
+                try:
+                    save_dir = os.path.commonpath([os.path.abspath(p) for p in test_paths])
+                except ValueError as err:
+                    raise ValueError(
+                        "여러 개의 --test-path가 서로 다른 드라이브에 있을 때는 "
+                        "--save-dir 또는 --base-test-path를 지정해야 합니다."
+                    ) from err
+            print(f'[info] --save-dir 미지정: 원본 위치에 labelme json을 저장합니다: {save_dir}')
+        else:
+            save_dir = 'temp/resultsxray'
     assert drawing_mode in ['mask', 'polygon'], "Invalid drawing mode specified."
     export_resize_hw = None
     if used_export:
@@ -425,29 +492,85 @@ def main(*,
     # path = 'E:/dataset/reverse_tomosynthesis/cbct_ios_dcm'
     # path = 'E:/dataset/reverse_tomosynthesis/kaggle_xrays/xray_teeth_seg_kaggle/Teeth Segmentation JSON'
     # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm/'
-    path = test_path
     # path = '/data1/jooyonglee/reverse_tomo/xray_panoramic/cbct_ios_dcm_latest_0824/JPEGImages/'
     # path = 
     
     mask_save_dir = save_dir # 'temp/resultsxray'
-    found = diskmanager.deep_search_files(path, exts=['.jpg', '.jpeg', 'JPG', 'JPEG'])
-    excluded = [file for file in found if is_inference_filename_excluded(file)]
-    found = [file for file in found if not is_inference_filename_excluded(file)]
+    exts = ['.jpg', '.jpeg', 'JPG', 'JPEG', '.png', 'PNG', 'bmp', 'BMP']
+    found_entries = []  # list of (file_path, source_test_path)
+    for tp in test_paths:
+        if include_dirs:
+            # base_path(tp) 기준 relative path는 유지한 채, 지정한 하위 디렉토리들만 탐색
+            for sub_dir in include_dirs:
+                sub_path = os.path.join(tp, sub_dir)
+                if not os.path.isdir(sub_path):
+                    print(f'[warning] include-dirs 경로가 없어 건너뜀: {sub_path}')
+                    continue
+                for f in diskmanager.deep_search_files(sub_path, exts=exts):
+                    found_entries.append((f, tp))
+        else:
+            for f in diskmanager.deep_search_files(tp, exts=exts):
+                found_entries.append((f, tp))
+
+    excluded = [f for f, _ in found_entries if is_inference_filename_excluded(f)]
+    found_entries = [(f, tp) for f, tp in found_entries if not is_inference_filename_excluded(f)]
     for file in excluded:
         print(f'Skipping excluded filename: {file}')
-    
+
+    if max_resolution is not None or min_resolution is not None:
+        kept = []
+        for file, tp in found_entries:
+            if is_resolution_excluded(file, max_resolution=max_resolution, min_resolution=min_resolution):
+                print(
+                    f'Skipping resolution-filtered image '
+                    f'(min={tuple(min_resolution) if min_resolution else None}, '
+                    f'max={tuple(max_resolution) if max_resolution else None} HxW): {file}'
+                )
+            else:
+                kept.append((file, tp))
+        found_entries = kept
+
     print('emtpy images')
     # found = glob.glob(f'{path}/*.jpg')
     i_break = 30
-    for idx, file in enumerate(found):
+    for idx, (file, src_root) in enumerate(found_entries):
         # if idx > i_break:
             # break
         if max_images is not None and idx >= max_images:
             break
-        # img = cv2.imread(file, cv2.IMREAD_GRAYSCALE)
-        img = image_utils.cv2_imread(file, flags=cv2.IMREAD_GRAYSCALE)
-        if apply_clahe_enhance:
-            img = apply_clahe(img, clip_limit=clahe_clip_limit, tile_grid=clahe_tile_grid)
+
+        if base_test_path:
+            rel_file = os.path.relpath(file, base_test_path)
+        elif not raw_save_dir and convert == 'labelme':
+            # --save-dir 미지정 labelme 모드: save_dir(=commonpath 또는 단일 test_path) 기준 상대경로로 원본 위치에 그대로 저장
+            rel_file = os.path.relpath(file, mask_save_dir)
+        elif len(test_paths) > 1:
+            # 여러 test_path가 주어졌고 base_test_path 미지정 시: 각 test_path의 폴더명을 prefix로 보존해 충돌 방지
+            tp_name = os.path.basename(os.path.normpath(src_root))
+            rel_in_tp = os.path.relpath(file, src_root)
+            rel_file = os.path.join(tp_name, rel_in_tp) if tp_name else rel_in_tp
+        else:
+            rel_file = os.path.relpath(file, src_root)
+        savename = os.path.join(mask_save_dir, rel_file)
+        stem, ext = os.path.splitext(savename)
+        if not overwrite:
+            target_path = f'{stem}.json' if convert == 'labelme' else (savename if save_drawing else None)
+            if target_path is not None and os.path.exists(target_path):
+                print(f'이미 결과가 있어 추론 건너뜀(--overwrite 지정 시 재처리): {target_path}')
+                continue
+
+        try:
+            # img = cv2.imread(file, cv2.IMREAD_GRAYSCALE)
+            img = image_utils.cv2_imread(file, flags=cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                print(f'이미지 로드 실패(손상/미지원 형식), 건너뜀: {file}')
+                continue
+            if apply_clahe_enhance:
+                img = apply_clahe(img, clip_limit=clahe_clip_limit, tile_grid=clahe_tile_grid)
+        except Exception as e:
+            print(e)
+            print(f'이미지 전처리 실패, 건너뜀: {file}')
+            continue
 
         try:
             if two_pass and not used_export:
@@ -459,6 +582,9 @@ def main(*,
                     min_scale_gain=min_scale_gain,
                     pass2_confidence_threshold=pass2_confidence_threshold,
                     convert_options=convert_options,
+                    polygon_thickness=polygon_thickness,
+                    draw_labels=draw_labels,
+                    label_font_scale=label_font_scale,
                 )
                 print(f'two_pass={used_two_pass} crop_box={crop_box}')
                 color_image, mask_iamge = [color_image0], [mask_image0]
@@ -489,14 +615,14 @@ def main(*,
                         input_content_box=input_content_box,
                         drawing_mode=drawing_mode,
                         polygon_thickness=polygon_thickness,
+                        draw_labels=draw_labels,
+                        label_font_scale=label_font_scale,
                         instance_results=instance_results,
                     )
 
             assert len(mask_iamge) == 1, "Expected a single mask image."
-            savename = os.path.join(mask_save_dir, os.path.relpath(file, path))
             os.makedirs(os.path.dirname(savename), exist_ok=True)
             from trainer import image_utils
-            stem, ext = os.path.splitext(savename)
             if convert == 'labelme':
                 from rfdetr.util.detr2labelme import save_labelme_annotation
 
@@ -513,24 +639,33 @@ def main(*,
                     polygon_epsilon=polygon_epsilon,
                 )
                 print(f"Saved Labelme annotation to: {labelme_path}")
-            else:
-                mask_path = f'{stem}.png'
+                if save_drawing:
+                    vis_target = (os.path.join(drawing_save_dir, rel_file)
+                                  if drawing_save_dir else f'{stem}_vis{ext}')
+                    os.makedirs(os.path.dirname(vis_target), exist_ok=True)
+                    image_utils.cv2_imwrite(vis_target, color_image[0].astype(np.uint8)[..., ::-1])
+                    print(f"Saved overlay drawing to: {vis_target}")
+            elif save_drawing:
+                vis_target = os.path.join(drawing_save_dir, rel_file) if drawing_save_dir else savename
+                os.makedirs(os.path.dirname(vis_target), exist_ok=True)
+                mask_path = mask_output_path(vis_target)
                 image_utils.cv2_imwrite(mask_path, mask_iamge[0].astype(np.uint8))
-                image_utils.cv2_imwrite(savename, color_image[0].astype(np.uint8)[..., ::-1])  # Convert RGB to BGR for saving with OpenCV
+                image_utils.cv2_imwrite(vis_target, color_image[0].astype(np.uint8)[..., ::-1])  # Convert RGB to BGR for saving with OpenCV
                 print(f"Saved mask image to: {mask_path}")
             processed_count += 1
 
             if overlap_report:
-                file_key = os.path.relpath(file, path)
+                file_key = rel_file
                 tooth_rows, pair_rows, overlap_map = compute_tooth_overlaps(
                     instance_results[0], file_key=file_key
                 )
                 all_tooth_rows.extend(tooth_rows)
                 all_pair_rows.extend(pair_rows)
-                if overlap_map is not None:
+                if save_drawing and overlap_map is not None:
                     highlight = draw_overlap_highlight(color_image[0], overlap_map)
-                    stem, ext = os.path.splitext(savename)
-                    image_utils.cv2_imwrite(f'{stem}_overlap{ext}', highlight[..., ::-1])
+                    vis_base = os.path.join(drawing_save_dir, rel_file) if drawing_save_dir else savename
+                    vis_stem, vis_ext = os.path.splitext(vis_base)
+                    image_utils.cv2_imwrite(f'{vis_stem}_overlap{vis_ext}', highlight[..., ::-1])
 
         except Exception as e:
             print(e)
@@ -836,7 +971,8 @@ def _predict_single_pass(img, model, convert_options, drawing_mode='polygon',
                           mask_probability_threshold=MASK_PROBABILITY_THRESHOLD,
                           segmentation_crop_box_scale=1.15, with_source_concat=False,
                           fdi_refinement=True, resize_hw=None, confidence_threshold=0.5,
-                          render=True, polygon_thickness=None, label_font_scale=None):
+                          render=True, polygon_thickness=None, draw_labels=True,
+                          label_font_scale=None):
     """img(전체 또는 crop) 1회 추론 + draw_preditions_boxes. img 자신의 해상도를 기준으로
     (color_image, mask_image, instance_result)를 반환한다 (batch 차원은 이미 벗겨져 있음).
     two_pass_predict()의 1차/2차 호출과 predict_wrapper()의 one-pass 경로가 공유한다.
@@ -882,6 +1018,7 @@ def _predict_single_pass(img, model, convert_options, drawing_mode='polygon',
             confidence_threshold=confidence_threshold,
             render=render,
             polygon_thickness=polygon_thickness,
+            draw_labels=draw_labels,
             label_font_scale=label_font_scale,
         )
     return color_image[0], mask_image[0], instance_results[0]
@@ -894,7 +1031,8 @@ def two_pass_predict(img, model, drawing_mode='polygon',
                       roi_shrink_ratio=DEFAULT_TWO_PASS_SHRINK_RATIO,
                       min_scale_gain=DEFAULT_TWO_PASS_MIN_SCALE_GAIN, convert_options=None,
                       pass1_confidence_threshold=0.5,
-                      pass2_confidence_threshold=DEFAULT_TWO_PASS_PASS2_CONFIDENCE_THRESHOLD):
+                      pass2_confidence_threshold=DEFAULT_TWO_PASS_PASS2_CONFIDENCE_THRESHOLD,
+                      polygon_thickness=None, draw_labels=True, label_font_scale=None):
     """1차: 전체 이미지 추론. 1차에서 검출된 치아 bbox로
     (``rfdetr.datasets.xray_crop_aug.teeth_roi_box_center_aware``, 11/21 정중선을 원점으로 고정한
     대칭 crop -- 학습 때 teeth_roi eval crop의 추론 전용 변형) 2차 crop 영역을 구하고, 그 영역만
@@ -936,7 +1074,9 @@ def two_pass_predict(img, model, drawing_mode='polygon',
             drawing_mode=drawing_mode, mask_probability_threshold=mask_probability_threshold,
             segmentation_crop_box_scale=segmentation_crop_box_scale,
             with_source_concat=with_source_concat, fdi_refinement=fdi_refinement,
-            confidence_threshold=pass1_confidence_threshold, render=render)
+            confidence_threshold=pass1_confidence_threshold, render=render,
+            polygon_thickness=polygon_thickness, draw_labels=draw_labels,
+            label_font_scale=label_font_scale)
 
     # 1차는 우선 render=False로 가볍게 돌려 box/fdi/score만 얻는다(ROI/게이팅 판단용). 2차가
     # 실제로 진행되면 1차의 전체 렌더링(원본 해상도 mask paste + contour, pano에서 실측 ~500ms,
@@ -976,8 +1116,10 @@ def two_pass_predict(img, model, drawing_mode='polygon',
     # polygon_thickness/label_font_scale을 원본(전체) 폭 기준으로 고정해서 넘긴다. crop 해상도로
     # render_detection을 부르면 자동 스케일이 crop 폭(작음) 기준으로 얇아져, 아래에서 그대로
     # 합성했을 때 "two-pass만 선이 얇아지는" 의도치 않은 시각적 차이가 생기기 때문.
-    full_thickness = 2 * max(1, int(round(w / 1000)))
-    full_font_scale = max(0.5, w / 1600.0)
+    full_thickness = (polygon_thickness if polygon_thickness is not None
+                      else 2 * max(1, int(round(w / 1000))))
+    full_font_scale = (label_font_scale if label_font_scale is not None
+                       else max(0.5, w / 1600.0))
 
     color2_crop, mask2_crop, inst2 = _predict_single_pass(
         crop_img, model, convert_options, drawing_mode=drawing_mode,
@@ -985,7 +1127,8 @@ def two_pass_predict(img, model, drawing_mode='polygon',
         segmentation_crop_box_scale=segmentation_crop_box_scale,
         with_source_concat=False, fdi_refinement=fdi_refinement,
         confidence_threshold=pass2_confidence_threshold,
-        polygon_thickness=full_thickness, label_font_scale=full_font_scale)
+        polygon_thickness=full_thickness, draw_labels=draw_labels,
+        label_font_scale=full_font_scale)
 
     # crop-local 좌표 -> 원본 좌표로 평행이동 (각주: 2차 결과가 1차를 완전히 대체한다. 1차에서
     # 검출된 치아는 teeth_roi_box_center_aware 구성상 margin 포함 crop 안에 항상 들어있지만,
@@ -1016,6 +1159,8 @@ def two_pass_predict(img, model, drawing_mode='polygon',
 def predict_wrapper(img, model=None, drawing_mode='polygon',
                     return_instance_results=False,
                     render=True,
+                    draw_labels=True,
+                    label_font_scale=None,
                     apply_clahe_enhance=False,
                     clahe_clip_limit=DEFAULT_PREDICT_CLAHE_CLIP_LIMIT,
                     clahe_tile_grid=DEFAULT_PREDICT_CLAHE_TILE_GRID,
@@ -1074,7 +1219,8 @@ def predict_wrapper(img, model=None, drawing_mode='polygon',
                 img, model, drawing_mode=drawing_mode, roi_margin=roi_margin,
                 roi_shrink_ratio=roi_shrink_ratio, min_scale_gain=min_scale_gain,
                 convert_options=convert_options,
-                pass2_confidence_threshold=pass2_confidence_threshold)
+                pass2_confidence_threshold=pass2_confidence_threshold,
+                draw_labels=draw_labels, label_font_scale=label_font_scale)
             if return_instance_results:
                 if return_two_pass_info:
                     return color_image, mask_image, instance_result, dict(
@@ -1118,6 +1264,8 @@ def predict_wrapper(img, model=None, drawing_mode='polygon',
             paste_masks_at_original_size=True,
             input_content_box=input_content_box,
             drawing_mode=drawing_mode,
+            draw_labels=draw_labels,
+            label_font_scale=label_font_scale,
             instance_results=instance_results,
             render=render,
         )
@@ -1183,16 +1331,61 @@ if __name__ == '__main__':
     )
     
     parser.add_argument(
-        '--test-path',
+        '--test-path', '--test_path',
+        dest='test_path',
         type=str,
+        nargs='+',
         default='',
-        help='Path to the test images.',
+        help='추론할 이미지 폴더 경로 (단일 경로 또는 공백으로 구분한 여러 경로 지정 가능).',
     )
     parser.add_argument(
-        '--save-dir',
+        '--base-test-path', '--base_test_path',
+        dest='base_test_path',
         type=str,
-        default='temp/resultsxray',
-        help='Directory to save the results.',
+        default=None,
+        help='결과 저장 시 상대 경로(하위 디렉토리 구조) 계산 기준이 되는 상위 루트 경로. '
+             '지정하면 save-dir 아래에 os.path.relpath(file, base_test_path) 구조로 하위 디렉토리를 '
+             '그대로 유지하며 저장한다 (미지정 시 --test-path 기준).',
+    )
+    parser.add_argument(
+        '--include-dirs', '--include_dirs',
+        dest='include_dirs',
+        type=str, nargs='+', default=None,
+        help='test-path 바로 아래 하위 디렉토리명만 지정해서 탐색 (예: --include-dirs DC1000_dataset PRAD dentex oralxrays_9). '
+             '미지정 시 test-path 전체를 재귀 탐색. 지정 시에도 save-dir에는 test-path 기준 상대경로 구조가 그대로 유지된다.',
+    )
+    parser.add_argument(
+        '--save-dir', '--save_dir',
+        dest='save_dir',
+        type=str,
+        default=None,
+        help='결과 저장 디렉토리 (기본 temp/resultsxray). --convert labelme 와 함께 미지정 시 '
+             '원본 이미지가 있는 위치(base-test-path 또는 test-path)에 json을 바로 저장한다(이미지 복사 없음).',
+    )
+    parser.add_argument(
+        '--overwrite', '--overwrite_results',
+        dest='overwrite',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='이미 결과 파일(labelme는 json, 그 외는 시각화 이미지)이 있으면 기본적으로 추론을 건너뛴다. '
+             '--overwrite 지정 시 있어도 다시 추론해서 덮어쓴다. 대량 배치 중 에러로 중단됐을 때 이어서 재실행하기 위한 옵션.',
+    )
+    parser.add_argument(
+        '--save-drawing', '--save_drawing',
+        dest='save_drawing',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='mask/polygon 오버레이 결과 시각화 이미지(및 overlap 하이라이트 이미지) 저장 여부 (기본 저장). '
+             '--no-save-drawing 지정 시 시각화 이미지는 저장하지 않고 연산 결과(labelme json, overlap 리포트 등)만 저장한다. '
+             '--convert labelme 와 함께 켜져 있으면 원본 이미지를 덮어쓰지 않도록 {stem}_vis{ext} (또는 --drawing-save-dir)로 저장한다.',
+    )
+    parser.add_argument(
+        '--drawing-save-dir', '--drawing_save_dir',
+        dest='drawing_save_dir',
+        type=str,
+        default=None,
+        help='오버레이 drawing 시각화 이미지를 별도 폴더에 (base-test-path/test-path 기준 하위 디렉토리 구조를 유지하며) '
+             '저장할 때 지정. 특히 --convert labelme 시 원본 폴더나 save-dir를 오염시키지 않고 시각화 이미지만 따로 모을 때 유용.',
     )
     parser.add_argument(
         '--drawing-mode', '--drawing_mode',
@@ -1211,6 +1404,20 @@ if __name__ == '__main__':
         help='polygon 모드 선 두께(px). 미지정 시 기존 자동 두께의 2배 (최소 2px, 2041px -> 4px).',
     )
     parser.add_argument(
+        '--draw-labels', '--draw_labels',
+        dest='draw_labels',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='각 치아 박스 위에 FDI 치아 번호 텍스트 표시 여부 (기본 활성, --no-draw-labels로 비활성).',
+    )
+    parser.add_argument(
+        '--label-font-scale', '--label_font_scale',
+        dest='label_font_scale',
+        type=float,
+        default=None,
+        help='FDI 치아 번호 텍스트 폰트 크기(cv2 fontScale). 미지정 시 이미지 폭 기준 자동 스케일.',
+    )
+    parser.add_argument(
         '--overlap-report', '--overlap_report',
         dest='overlap_report',
         action=argparse.BooleanOptionalAction,
@@ -1223,6 +1430,20 @@ if __name__ == '__main__':
         type=int,
         default=None,
         help='처리할 최대 이미지 수 (디버깅용).',
+    )
+    parser.add_argument(
+        '--max-resolution', '--max_resolution', '--max-resol', '--max_resol',
+        dest='max_resolution',
+        type=int, nargs=2, default=None, metavar=('H', 'W'),
+        help='이 해상도(H W)를 초과하는 이미지는 추론에서 제외 (기본 None: 필터링 안 함. PIL 헤더만 읽어 빠르게 체크). '
+             '예: 치근단(1000 이하)과 파노라믹(2640x1256)이 섞인 폴더에서 치근단만 추론할 때 사용.',
+    )
+    parser.add_argument(
+        '--min-resolution', '--min_resolution', '--min-resol', '--min_resol',
+        dest='min_resolution',
+        type=int, nargs=2, default=None, metavar=('H', 'W'),
+        help='이 해상도(H W) 미만인 이미지는 추론에서 제외 (기본 None: 필터링 안 함. PIL 헤더만 읽어 빠르게 체크). '
+             '예: 파노라믹만 골라 추론할 때 사용.',
     )
     parser.add_argument(
         '--convert',
@@ -1239,10 +1460,10 @@ if __name__ == '__main__':
         '--polygon-epsilon', '--polygon_epsilon',
         dest='polygon_epsilon',
         type=float,
-        default=2.0,
+        default=1.0,
         help=(
             'RDP polygon simplification error in pixels for Labelme output. '
-            '0 disables simplification (default: 2.0).'
+            '0 disables simplification (default: 1.0).'
         ),
     )
     parser.add_argument(
@@ -1340,8 +1561,9 @@ if __name__ == '__main__':
     if cli_args.export:
         if not cli_args.version:
             parser.error('--export requires --version (output: {save_dir}/{version}/)')
+        export_save_dir = cli_args.save_dir or 'temp/resultsxray'
         export_libtorch(
-            os.path.join(cli_args.save_dir, cli_args.version, 'model_libtorch.pt'),
+            os.path.join(export_save_dir, cli_args.version, 'model_libtorch.pt'),
             shape=tuple(cli_args.export_shape),
             dtype=getattr(torch, cli_args.export_dtype),
             pretrain_weights=cli_args.pretrain_weights,
