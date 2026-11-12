@@ -451,15 +451,28 @@ python -m rfdetr.deploy.predict `
   --drawing-save-dir "<오버레이_이미지만_모을_루트_경로>" `
   --min-resol 1000 1000 ` 
   --convert labelme
-~~~
+
+
+# evaluation dataset 기반 처리.
+python -m rfdetr.deploy.predict `
+  --pretrain-weights "outputs/pretrained/segmentation/xray_teeth_seg/peri_data_fusion_1106_ce/checkpoint_best_ema.pth" `
+  --test-file-list "docs/assets/imperfect_cases_full.json" `
+  --base-test-path "/data1/jooyonglee/public/xrays" `
+  --test-path "E:\dataset\public\xrays" `
+  --save-dir "E:\dataset\public\xrays_pred_labelme" `
+  --convert labelme
 
 
 python -m rfdetr.deploy.predict `
   --pretrain-weights "outputs/pretrained/segmentation/xray_teeth_seg/peri_data_fusion_1106_ce/checkpoint_best_ema.pth" `
-  --base-test-path "E:/temp/temp_xrays" `
-  --test-path "E:/temp/temp_xrays/small_image_test" `
-  "E:/temp/temp_xrays/my_tttest" `
-  "E:/temp/temp_xrays/test_folder" `
-  --save-dir "E:/temp/temp_xrays_outputs" `
+  --test-path `
+  "E:/dataset/public/xrays/DC1000_dataset/org_train_dataset/images" `
+  "E:/dataset/public/xrays/DentalOPG-1550 A Panoramic Dental X-Ray Image Data" `
+  "E:/dataset/public/xrays/lokisilvres/dental-disease-panoramic-detection-dataset/versions/6/YOLO/YOLO/train/images" `
+  "E:/dataset/public/xrays/oralxrays_9/train2017/train2017" `
+  --base-test-path "E:/dataset/public/xrays" `
   --min-resol 1000 1000 `
+  --max-num-per-directory 800 `
+  --save-dir "E:/dataset/public/xrays_pred_labelme_500" `
   --convert labelme
+~~~
