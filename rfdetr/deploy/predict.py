@@ -392,16 +392,147 @@ def mask_output_path(savename):
     return f'{stem}_mask.png' if ext.lower() == '.png' else f'{stem}.png'
 
 
+def load_test_file_list(json_path, test_paths, base_test_path=None, imperfect_only=True):
+    """JSON 평가 파일(예: docs/assets/imperfect_cases_full.json)에서 추론 대상 파일 목록을 파싱한다.
+
+    - JSON 구조: ``{"results": {"dentex": [{"path": "...", "recall": ..., "precision": ...}], ...}}``
+      또는 ``[{"path": ...}, ...]`` / ``["path1", ...]`` 형태를 모두 지원.
+    - ``imperfect_only=True``이면 ``recall < 1.0`` 또는 ``precision < 1.0``인 항목만 추린다.
+    - ``base_test_path``(예: ``/data1/jooyonglee/public/xrays``)가 주어지면 각 항목의 ``path``에서
+      해당 prefix를 떼어낸 상대경로를 현재 플랫폼의 ``test_paths[0]``(예: ``E:\\dataset\\public\\xrays``)
+      하위 경로로 매핑한다.
+
+    Returns:
+        list of ``(local_file_path, source_root_for_relpath)``
+    """
+    import json
+
+    with open(json_path, encoding='utf-8') as f:
+        data = json.load(f)
+
+    raw_records = []
+    if isinstance(data, dict):
+        results = data.get('results', data)
+        if isinstance(results, dict):
+            for group_items in results.values():
+                if isinstance(group_items, list):
+                    raw_records.extend(group_items)
+        elif isinstance(results, list):
+            raw_records.extend(results)
+    elif isinstance(data, list):
+        raw_records.extend(data)
+    else:
+        raise ValueError(f'Unsupported JSON format in --test-file-list: {json_path}')
+
+    local_roots = [p for p in test_paths if p]
+    norm_base = base_test_path.replace('\\', '/').rstrip('/') if base_test_path else None
+
+    entries = []
+    skipped_perfect = 0
+    for rec in raw_records:
+        if isinstance(rec, str):
+            raw_path = rec
+        elif isinstance(rec, dict) and 'path' in rec:
+            if imperfect_only:
+                recall = rec.get('recall')
+                precision = rec.get('precision')
+                if (recall is not None and precision is not None
+                        and float(recall) >= 1.0 and float(precision) >= 1.0):
+                    skipped_perfect += 1
+                    continue
+            raw_path = rec['path']
+        else:
+            continue
+
+        norm_p = raw_path.replace('\\', '/')
+        rel_sub = None
+        if norm_base:
+            if norm_p == norm_base:
+                rel_sub = ''
+            elif norm_p.startswith(norm_base + '/'):
+                rel_sub = norm_p[len(norm_base) + 1:]
+            else:
+                # 대소문자/경로 구분자 차이를 허용하는 fallback
+                idx = norm_p.lower().find(norm_base.lower() + '/')
+                if idx != -1:
+                    rel_sub = norm_p[idx + len(norm_base) + 1:]
+
+        if rel_sub is not None and local_roots:
+            rel_os = os.path.normpath(rel_sub)
+            matched = None
+            for root in local_roots:
+                candidate = os.path.join(root, rel_os)
+                if os.path.exists(candidate):
+                    matched = (candidate, root)
+                    break
+            if matched is None:
+                matched = (os.path.join(local_roots[0], rel_os), local_roots[0])
+            entries.append(matched)
+        else:
+            src_root = local_roots[0] if local_roots else os.path.dirname(raw_path)
+            entries.append((os.path.normpath(raw_path), src_root))
+
+    print(
+        f'[test-file-list] {json_path}: selected {len(entries)} files '
+        f'(skipped perfect={skipped_perfect}, imperfect_only={imperfect_only})'
+    )
+    return entries
+
+
+def limit_entries_per_directory(found_entries, max_num_per_directory, test_paths=None):
+    """디렉토리(데이터셋 그룹)별 최대 파일 개수를 ``max_num_per_directory``로 제한한다.
+
+    - 그룹 기준:
+      1) 여러 ``test_path``가 주어진 경우 각 ``src_root``(예: ``--test-path a b c``).
+      2) 단일 ``test_path`` 아래에 하위 디렉토리들이 있는 경우 ``test_path`` 직속 1단계 하위 폴더명
+         (예: ``DC1000_dataset``, ``PRAD``, ``dentex`` 등). 직속 파일은 ``'.'`` 그룹으로 묶는다.
+    - 그룹 내 파일 수가 ``max_num_per_directory``를 초과하면 정렬된 목록에서 등간격(균일, uniform stride)으로
+      ``max_num_per_directory``개를 추출하고, 이하면 전부 유지한다.
+    """
+    if max_num_per_directory is None:
+        return found_entries
+    if max_num_per_directory <= 0:
+        raise ValueError("max_num_per_directory must be positive when specified")
+
+    multi_roots = test_paths is not None and len([p for p in test_paths if p]) > 1
+    grouped = defaultdict(list)
+    for file, tp in found_entries:
+        if multi_roots:
+            key = os.path.normpath(tp)
+        else:
+            rel = os.path.relpath(file, tp).replace('\\', '/')
+            parts = [p for p in rel.split('/') if p and p != '.']
+            key = parts[0] if len(parts) > 1 else os.path.basename(os.path.normpath(tp)) or '.'
+        grouped[key].append((file, tp))
+
+    limited = []
+    for key, items in grouped.items():
+        n_total = len(items)
+        if n_total > max_num_per_directory:
+            # 전체 구간에서 균일(등간격)하게 max_num_per_directory개 샘플링
+            indices = np.linspace(0, n_total - 1, num=max_num_per_directory, dtype=int)
+            selected = [items[i] for i in indices]
+            print(f'[max-num-per-directory] {key}: {n_total} -> {len(selected)} (uniformly sampled)')
+        else:
+            selected = items
+            print(f'[max-num-per-directory] {key}: {n_total} -> {len(selected)} (kept all)')
+        limited.extend(selected)
+    return limited
+
+
 def main(*,
          use_ema=True, with_source_concat=False,
          test_path='',
          base_test_path=None,
+         test_file_list=None,
+         imperfect_only=True,
          include_dirs=None,
+         max_num_per_directory=None,
          max_resolution=None,
          min_resolution=None,
          overwrite=False,
          save_dir = None,
-         save_drawing=True,
+         save_drawing=None,
          drawing_save_dir=None,
          drawing_mode='polygon',
          polygon_thickness=None,
@@ -437,6 +568,10 @@ def main(*,
         drawing_mode = 'polygon'
         if overlap_report is None:
             overlap_report = False
+        if save_drawing is None:
+            save_drawing = bool(drawing_save_dir)
+    elif save_drawing is None:
+        save_drawing = True
     if isinstance(test_path, (list, tuple)):
         test_paths = [os.fspath(p) for p in test_path if p]
     elif test_path:
@@ -447,7 +582,7 @@ def main(*,
     raw_save_dir = save_dir
     if not save_dir:
         if convert == 'labelme':
-            if base_test_path:
+            if base_test_path and not test_file_list and os.path.exists(base_test_path):
                 save_dir = base_test_path
             elif len(test_paths) == 1:
                 save_dir = test_paths[0]
@@ -498,19 +633,35 @@ def main(*,
     mask_save_dir = save_dir # 'temp/resultsxray'
     exts = ['.jpg', '.jpeg', 'JPG', 'JPEG', '.png', 'PNG', 'bmp', 'BMP']
     found_entries = []  # list of (file_path, source_test_path)
-    for tp in test_paths:
+    if test_file_list:
+        found_entries = load_test_file_list(
+            test_file_list,
+            test_paths=test_paths,
+            base_test_path=base_test_path,
+            imperfect_only=imperfect_only,
+        )
         if include_dirs:
-            # base_path(tp) 기준 relative path는 유지한 채, 지정한 하위 디렉토리들만 탐색
-            for sub_dir in include_dirs:
-                sub_path = os.path.join(tp, sub_dir)
-                if not os.path.isdir(sub_path):
-                    print(f'[warning] include-dirs 경로가 없어 건너뜀: {sub_path}')
-                    continue
-                for f in diskmanager.deep_search_files(sub_path, exts=exts):
+            norm_includes = {d.replace('\\', '/').strip('/') for d in include_dirs}
+            filtered = []
+            for f, tp in found_entries:
+                rel_parts = os.path.relpath(f, tp).replace('\\', '/').split('/')
+                if rel_parts and rel_parts[0] in norm_includes:
+                    filtered.append((f, tp))
+            found_entries = filtered
+    else:
+        for tp in test_paths:
+            if include_dirs:
+                # base_path(tp) 기준 relative path는 유지한 채, 지정한 하위 디렉토리들만 탐색
+                for sub_dir in include_dirs:
+                    sub_path = os.path.join(tp, sub_dir)
+                    if not os.path.isdir(sub_path):
+                        print(f'[warning] include-dirs 경로가 없어 건너뜀: {sub_path}')
+                        continue
+                    for f in diskmanager.deep_search_files(sub_path, exts=exts):
+                        found_entries.append((f, tp))
+            else:
+                for f in diskmanager.deep_search_files(tp, exts=exts):
                     found_entries.append((f, tp))
-        else:
-            for f in diskmanager.deep_search_files(tp, exts=exts):
-                found_entries.append((f, tp))
 
     excluded = [f for f, _ in found_entries if is_inference_filename_excluded(f)]
     found_entries = [(f, tp) for f, tp in found_entries if not is_inference_filename_excluded(f)]
@@ -530,6 +681,11 @@ def main(*,
                 kept.append((file, tp))
         found_entries = kept
 
+    if max_num_per_directory is not None:
+        found_entries = limit_entries_per_directory(
+            found_entries, max_num_per_directory, test_paths=test_paths
+        )
+
     print('emtpy images')
     # found = glob.glob(f'{path}/*.jpg')
     i_break = 30
@@ -539,12 +695,12 @@ def main(*,
         if max_images is not None and idx >= max_images:
             break
 
-        if base_test_path:
+        if base_test_path and not test_file_list:
             rel_file = os.path.relpath(file, base_test_path)
         elif not raw_save_dir and convert == 'labelme':
             # --save-dir 미지정 labelme 모드: save_dir(=commonpath 또는 단일 test_path) 기준 상대경로로 원본 위치에 그대로 저장
             rel_file = os.path.relpath(file, mask_save_dir)
-        elif len(test_paths) > 1:
+        elif len(test_paths) > 1 and not test_file_list:
             # 여러 test_path가 주어졌고 base_test_path 미지정 시: 각 test_path의 폴더명을 prefix로 보존해 충돌 방지
             tp_name = os.path.basename(os.path.normpath(src_root))
             rel_in_tp = os.path.relpath(file, src_root)
@@ -1343,9 +1499,26 @@ if __name__ == '__main__':
         dest='base_test_path',
         type=str,
         default=None,
-        help='결과 저장 시 상대 경로(하위 디렉토리 구조) 계산 기준이 되는 상위 루트 경로. '
-             '지정하면 save-dir 아래에 os.path.relpath(file, base_test_path) 구조로 하위 디렉토리를 '
-             '그대로 유지하며 저장한다 (미지정 시 --test-path 기준).',
+        help='1) --test-file-list 사용 시: JSON 내부 경로에서 떼어낼 원본 플랫폼 prefix '
+             '(예: /data1/jooyonglee/public/xrays -> 이를 --test-path 로 치환). '
+             '2) 일반 폴더 탐색 시: 결과 저장 상대 경로(하위 디렉토리 구조) 계산 기준이 되는 상위 루트 경로.',
+    )
+    parser.add_argument(
+        '--test-file-list', '--test_file_list',
+        dest='test_file_list',
+        type=str,
+        default=None,
+        help='추론할 파일 목록이 담긴 JSON 경로 (예: docs/assets/imperfect_cases_full.json). '
+             '기본적으로 precision < 1.0 또는 recall < 1.0 인 케이스만 추려서 실행하며, '
+             'JSON 내 경로의 --base-test-path prefix를 --test-path 로 치환해 로컬 파일을 찾는다.',
+    )
+    parser.add_argument(
+        '--imperfect-only', '--imperfect_only',
+        dest='imperfect_only',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='--test-file-list 사용 시 precision < 1.0 또는 recall < 1.0 인 케이스만 추론할지 여부 '
+             '(기본 활성, --no-imperfect-only 지정 시 JSON 내 전체 파일 추론).',
     )
     parser.add_argument(
         '--include-dirs', '--include_dirs',
@@ -1374,10 +1547,10 @@ if __name__ == '__main__':
         '--save-drawing', '--save_drawing',
         dest='save_drawing',
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help='mask/polygon 오버레이 결과 시각화 이미지(및 overlap 하이라이트 이미지) 저장 여부 (기본 저장). '
-             '--no-save-drawing 지정 시 시각화 이미지는 저장하지 않고 연산 결과(labelme json, overlap 리포트 등)만 저장한다. '
-             '--convert labelme 와 함께 켜져 있으면 원본 이미지를 덮어쓰지 않도록 {stem}_vis{ext} (또는 --drawing-save-dir)로 저장한다.',
+        default=None,
+        help='mask/polygon 오버레이 결과 시각화 이미지(및 overlap 하이라이트 이미지) 저장 여부. '
+             '기본값: 일반 추론 시 True, --convert labelme 시 False(원본+json만 저장). '
+             '--convert labelme 에서 오버레이 이미지도 함께 저장하려면 --save-drawing (또는 --drawing-save-dir)을 명시적으로 지정.',
     )
     parser.add_argument(
         '--drawing-save-dir', '--drawing_save_dir',
@@ -1429,7 +1602,17 @@ if __name__ == '__main__':
         dest='max_images',
         type=int,
         default=None,
-        help='처리할 최대 이미지 수 (디버깅용).',
+        help='처리할 전체 최대 이미지 수 (디버깅용).',
+    )
+    parser.add_argument(
+        '--max-num-per-directory', '--max_num_per_directory',
+        dest='max_num_per_directory',
+        type=int,
+        default=None,
+        help='디렉토리(하위 데이터셋 폴더 또는 개별 --test-path)별 최대 처리 이미지 수 상한. '
+             '예: --max-num-per-directory 1000 지정 시 각 디렉토리가 10000개, 20000개, 100개면 '
+             '각각 1000개(등간격 균일 추출), 1000개(등간격 균일 추출), 100개(전부)만 처리한다. '
+             '미지정(None) 시 제한 없이 전부 처리.',
     )
     parser.add_argument(
         '--max-resolution', '--max_resolution', '--max-resol', '--max_resol',
